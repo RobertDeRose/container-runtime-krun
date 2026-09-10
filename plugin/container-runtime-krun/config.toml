@@ -1,0 +1,12 @@
+abstract = "libkrun runtime for Apple Container"
+author = "container-runtime-krun contributors"
+version = 0.1
+
+[servicesConfig]
+loadAtBoot = false
+runAtLoad = false
+defaultArguments = []
+
+[[servicesConfig.services]]
+type = "runtime"
+description = "Run one Apple Container sandbox using libkrun and Hypervisor.framework"
