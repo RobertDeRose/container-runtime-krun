@@ -108,13 +108,25 @@ The networked lifecycle collector repeats the established feasibility workload t
 
 The acceptance criterion is not an immediate one-for-one RSS drop. libkrun uses `MADV_FREE`; the important property is that released guest backing becomes reclaimable under host pressure while the guest remains usable. The archived host samples should be compared with the previously validated memory-reclamation behavior and, where useful, with `container-runtime-linux` under equivalent host pressure.
 
-## Gate 7: fail-closed v0.2 boundaries
+## Gate 7: published TCP/UDP ports
 
-Verify each unsupported feature produces an explicit error before VM startup where possible:
+After the packet path and lifecycle regression pass, validate host-to-guest forwarding with:
+
+```bash
+scripts/validate_port_forwarding.sh --install
+```
+
+The validator starts one networked container with both a loopback TCP publication and a loopback UDP publication. It verifies TCP request/response traffic, UDP echo traffic, container cleanup, Apple allocation release, and that both host ports can be rebound after the container is deleted. It then exercises a partial-bind failure: one host TCP port is published successfully before a second requested port collides with an already-bound listener. The first port must be released when bootstrap fails, and the failed container must leave no runtime, VMM, vmnet helper, Unix socket, or Apple network allocation behind.
+
+The runtime uses Apple Container's public `SocketForwarder` implementation and the Apple-assigned attachment address; the validator does not create a second forwarding or IPAM mechanism. Results are packaged as `validation-results/container-runtime-krun-ports-*.tar.gz`.
+
+## Gate 8: fail-closed v0.2 boundaries
+
+Verify each remaining unsupported feature produces an explicit error before VM startup where possible:
 
 - request more than one network attachment;
-- publish a port;
 - add a host/volume mount;
+- publish a Unix socket;
 - request Rosetta;
 - request nested virtualization;
 - request SSH forwarding;
