@@ -46,9 +46,10 @@ let package = Package(
       dependencies: [
         "KrunRuntimeCore",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "ContainerLog", package: "container"),
+        .product(name: "ContainerPlugin", package: "container"),
         .product(name: "ContainerRuntimeClient", package: "container"),
         .product(name: "ContainerXPC", package: "container"),
-        .product(name: "Logging", package: "swift-log"),
       ]
     ),
     .executableTarget(name: "KrunVMMHelper", dependencies: ["KrunVMMProtocol"]),

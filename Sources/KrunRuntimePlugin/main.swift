@@ -1,9 +1,10 @@
 import ArgumentParser
+import ContainerLog
+import ContainerPlugin
 import ContainerRuntimeClient
 import ContainerXPC
 import Foundation
 import KrunRuntimeCore
-import Logging
 
 @main
 struct KrunRuntimePlugin: AsyncParsableCommand {
@@ -37,12 +38,13 @@ extension KrunRuntimePlugin {
     }
 
     func run() async throws {
-      LoggingSystem.bootstrap { label in
-        var handler = StreamLogHandler.standardError(label: label)
-        handler.logLevel = debug ? .debug : .info
-        return handler
-      }
-      let log = Logger(label: "container-runtime-krun")
+      let logPath = LogRoot.path?.appending("container-runtime-krun-\(uuid).log")
+      let log = ServiceLogger.bootstrap(
+        category: "RuntimeKrun",
+        metadata: ["uuid": "\(uuid)"],
+        debug: debug,
+        logPath: logPath
+      )
       signal(SIGPIPE, SIG_IGN)
 
       nonisolated(unsafe) let anonymousConnection = xpc_connection_create(nil, nil)

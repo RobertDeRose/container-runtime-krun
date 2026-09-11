@@ -55,6 +55,7 @@ public final class KrunVMController: @unchecked Sendable {
     helperPath: String,
     networkConfigs: [KrunNetworkConfig] = [],
     networkAttachments: [Attachment] = [],
+    lifecycleStartedAt: ContinuousClock.Instant = ContinuousClock.now,
     libkrunPath: String = KrunDefaults.libkrunPath,
     log: Logger
   ) async throws -> KrunVMController {
@@ -124,7 +125,18 @@ public final class KrunVMController: @unchecked Sendable {
       helper.arguments = [helperConfigPath.path]
       helper.standardOutput = helperLog
       helper.standardError = helperLog
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: lifecycleStartedAt,
+        event: "libkrun helper launch"
+      )
       try helper.run()
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: lifecycleStartedAt,
+        event: "libkrun helper launched",
+        metadata: ["pid": "\(helper.processIdentifier)"]
+      )
 
       let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
       let agent: Vminitd
@@ -133,14 +145,31 @@ public final class KrunVMController: @unchecked Sendable {
           socketPath: layout.controlPath,
           helper: helper,
           helperLogPath: helperLogPath,
-          group: group
+          group: group,
+          log: log,
+          lifecycleStartedAt: lifecycleStartedAt
+        )
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "guest setup start"
         )
         try await agent.standardSetup()
         let sysctls = KrunSpecBuilder.guestSysctls(config)
         if !sysctls.isEmpty {
           try await agent.sysctl(settings: sysctls)
         }
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "guest setup complete"
+        )
         let rootPath = KrunSpecBuilder.guestRootPath(containerID: config.id)
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "rootfs mount start"
+        )
         try await agent.mkdir(path: rootPath, all: true, perms: 0o755)
         try await agent.mount(
           ContainerizationOCI.Mount(
@@ -149,13 +178,33 @@ public final class KrunVMController: @unchecked Sendable {
             destination: rootPath
           )
         )
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "rootfs mount complete"
+        )
+        if !networkAttachments.isEmpty {
+          KrunLifecycleTrace.mark(
+            log,
+            startedAt: lifecycleStartedAt,
+            event: "guest network configuration start"
+          )
+        }
         try await configureNetworking(
           agent: agent,
           config: config,
           attachments: networkAttachments,
           rootPath: rootPath,
+          lifecycleStartedAt: lifecycleStartedAt,
           log: log
         )
+        if !networkAttachments.isEmpty {
+          KrunLifecycleTrace.mark(
+            log,
+            startedAt: lifecycleStartedAt,
+            event: "guest network configuration complete"
+          )
+        }
         return KrunVMController(
           id: config.id,
           bundle: bundle,
@@ -194,7 +243,9 @@ public final class KrunVMController: @unchecked Sendable {
       socketPath: socketLayout.controlPath,
       helper: helper,
       helperLogPath: bundle.filePath(for: "krun-vmm.log"),
-      group: group
+      group: group,
+      log: log,
+      lifecycleStartedAt: nil
     )
   }
 
@@ -210,11 +261,16 @@ public final class KrunVMController: @unchecked Sendable {
     socketPath: String,
     helper: Foundation.Process,
     helperLogPath: URL,
-    group: MultiThreadedEventLoopGroup
+    group: MultiThreadedEventLoopGroup,
+    log: Logger,
+    lifecycleStartedAt: ContinuousClock.Instant?
   ) async throws -> Vminitd {
     let deadline = ContinuousClock.now.advanced(by: .seconds(30))
     var lastError: Error?
+    var loggedTransportConnection = false
+    var attempt = 0
     repeat {
+      attempt += 1
       guard helper.isRunning else {
         let log = (try? String(contentsOf: helperLogPath, encoding: .utf8)) ?? ""
         throw ContainerizationError(
@@ -233,14 +289,49 @@ public final class KrunVMController: @unchecked Sendable {
             connection: FileHandle(fileDescriptor: fd, closeOnDealloc: false),
             group: group
           )
+          if !loggedTransportConnection, let lifecycleStartedAt {
+            KrunLifecycleTrace.mark(
+              log,
+              startedAt: lifecycleStartedAt,
+              event: "vminitd transport connected"
+            )
+            loggedTransportConnection = true
+          }
           do {
             // libkrun can accept the host UDS before the guest is listening on the
             // forwarded vsock port. Keep readiness tied to a real vminitd RPC, but
             // bound each probe so a stale pre-listener connection is discarded and
             // retried instead of waiting for gRPC's transport failure timeout.
+            if let lifecycleStartedAt {
+              KrunLifecycleTrace.mark(
+                log,
+                startedAt: lifecycleStartedAt,
+                event: "vminitd readiness RPC start",
+                metadata: ["attempt": "\(attempt)"]
+              )
+            }
             try await probeAgentReadiness(agent)
+            if let lifecycleStartedAt {
+              KrunLifecycleTrace.mark(
+                log,
+                startedAt: lifecycleStartedAt,
+                event: "first successful vminitd RPC",
+                metadata: ["attempt": "\(attempt)"]
+              )
+            }
             return agent
           } catch {
+            if let lifecycleStartedAt {
+              KrunLifecycleTrace.mark(
+                log,
+                startedAt: lifecycleStartedAt,
+                event: "vminitd readiness RPC failed",
+                metadata: [
+                  "attempt": "\(attempt)",
+                  "error": "\(String(describing: error))",
+                ]
+              )
+            }
             try? await agent.close()
             throw error
           }
@@ -288,6 +379,7 @@ public final class KrunVMController: @unchecked Sendable {
     config: ContainerConfiguration,
     attachments: [Attachment],
     rootPath: String,
+    lifecycleStartedAt: ContinuousClock.Instant,
     log: Logger
   ) async throws {
     guard !attachments.isEmpty else { return }
@@ -302,7 +394,19 @@ public final class KrunVMController: @unchecked Sendable {
           ipv6Address: attachment.ipv6Address
         )
       )
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: lifecycleStartedAt,
+        event: "guest network address configured",
+        metadata: ["network_index": "\(index)"]
+      )
       try await agent.up(name: name, mtu: mtu)
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: lifecycleStartedAt,
+        event: "guest network link up",
+        metadata: ["network_index": "\(index)"]
+      )
 
       guard index == 0 else { continue }
       let gateway = attachment.ipv4Gateway
@@ -321,6 +425,12 @@ public final class KrunVMController: @unchecked Sendable {
         name: name,
         route: .init(ipv4Gateway: gateway, ipv6Gateway: nil)
       )
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: lifecycleStartedAt,
+        event: "guest default route configured",
+        metadata: ["network_index": "\(index)"]
+      )
     }
 
     if let dns = config.dns {
@@ -337,6 +447,11 @@ public final class KrunVMController: @unchecked Sendable {
         ),
         location: rootPath
       )
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: lifecycleStartedAt,
+        event: "guest DNS configured"
+      )
     }
 
     var hostsEntries = [Hosts.Entry.localHostIPV4()]
@@ -349,6 +464,11 @@ public final class KrunVMController: @unchecked Sendable {
     try await agent.configureHosts(
       config: Hosts(entries: hostsEntries),
       location: rootPath
+    )
+    KrunLifecycleTrace.mark(
+      log,
+      startedAt: lifecycleStartedAt,
+      event: "guest hosts configured"
     )
     log.debug(
       "configured libkrun network",

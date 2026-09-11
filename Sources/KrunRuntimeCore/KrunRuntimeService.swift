@@ -45,6 +45,7 @@ public actor KrunRuntimeService {
   private var networkSessions: [XPCClientSession] = []
   private var networkAttachments: [Attachment] = []
   private var networkBackends: [KrunVMNetBackend] = []
+  private var lifecycleStartedAt: ContinuousClock.Instant?
 
   public init(
     root: URL,
@@ -72,6 +73,10 @@ public actor KrunRuntimeService {
       throw ContainerizationError(
         .invalidState, message: "runtime is not in a bootstrappable state")
     }
+
+    let startedAt = ContinuousClock.now
+    lifecycleStartedAt = startedAt
+    KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "bootstrap start")
     let networkInfos = try message.networkBootstrapInfos()
 
     let bundle = try ensureBundle()
@@ -80,7 +85,8 @@ public actor KrunRuntimeService {
     let networkResources = try await prepareNetworking(
       config: containerConfig,
       networkInfos: networkInfos,
-      bundle: bundle
+      bundle: bundle,
+      startedAt: startedAt
     )
     let controller: KrunVMController
     do {
@@ -89,6 +95,7 @@ public actor KrunRuntimeService {
         helperPath: helperPath,
         networkConfigs: networkResources.backends.map(\.networkConfig),
         networkAttachments: networkResources.attachments,
+        lifecycleStartedAt: startedAt,
         log: log
       )
     } catch {
@@ -115,6 +122,7 @@ public actor KrunRuntimeService {
       )
     ]
     self.state = .booted
+    KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "bootstrap reply")
     return message.reply()
   }
 
@@ -139,6 +147,13 @@ public actor KrunRuntimeService {
   @Sendable
   public func startProcess(_ message: XPCMessage) async throws -> XPCMessage {
     let id = try message.id()
+    let startedAt = lifecycleStartedAt ?? ContinuousClock.now
+    KrunLifecycleTrace.mark(
+      log,
+      startedAt: startedAt,
+      event: "startProcess start",
+      metadata: ["process_id": "\(id)"]
+    )
     guard let controller = vm, let containerConfig = config, let pool = portPool else {
       throw ContainerizationError(.invalidState, message: "runtime is not booted")
     }
@@ -180,8 +195,26 @@ public actor KrunRuntimeService {
         options: nil
       )
       processCreated = true
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: startedAt,
+        event: "guest process created",
+        metadata: ["process_id": "\(id)"]
+      )
       try await io.waitForGuestConnections()
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: startedAt,
+        event: "guest stdio connected",
+        metadata: ["process_id": "\(id)"]
+      )
       _ = try await processAgent.startProcess(id: id, containerID: containerConfig.id)
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: startedAt,
+        event: "guest process started",
+        metadata: ["process_id": "\(id)"]
+      )
     } catch {
       if processCreated {
         try? await processAgent.deleteProcess(id: id, containerID: containerConfig.id)
@@ -483,7 +516,8 @@ public actor KrunRuntimeService {
   private func prepareNetworking(
     config: ContainerConfiguration,
     networkInfos: [NetworkBootstrapInfo],
-    bundle: ContainerResource.Bundle
+    bundle: ContainerResource.Bundle,
+    startedAt: ContinuousClock.Instant
   ) async throws -> NetworkResources {
     guard config.networks.count == networkInfos.count else {
       throw ContainerizationError(
@@ -507,10 +541,30 @@ public actor KrunRuntimeService {
         let client = NetworkClient(id: attachmentConfig.network, plugin: info.plugin)
         let session = client.connect()
         sessions.append(session)
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: startedAt,
+          event: "network allocation start",
+          metadata: [
+            "network": "\(attachmentConfig.network)",
+            "network_index": "\(index)",
+          ]
+        )
         var (attachment, _) = try await client.allocate(
           hostname: attachmentConfig.options.hostname,
           macAddress: attachmentConfig.options.macAddress,
           on: session
+        )
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: startedAt,
+          event: "network allocation complete",
+          metadata: [
+            "ipv4": "\(attachment.ipv4Address)",
+            "network": "\(attachment.network)",
+            "network_index": "\(index)",
+            "variant": "\(attachment.variant ?? "unknown")",
+          ]
         )
         if let mtu = attachmentConfig.options.mtu {
           attachment = Attachment(
@@ -527,7 +581,9 @@ public actor KrunRuntimeService {
         let backend = try await KrunVMNetBackend.start(
           attachment: attachment,
           index: index,
-          logPath: bundle.filePath(for: "krun-vmnet-\(index).log")
+          logPath: bundle.filePath(for: "krun-vmnet-\(index).log"),
+          lifecycleStartedAt: startedAt,
+          log: log
         )
         attachments.append(attachment)
         backends.append(backend)

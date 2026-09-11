@@ -135,4 +135,4 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 ## Status
 
-The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. v0.2 adds explicit `allocationOnly` NAT networking and still requires end-to-end validation of the vmnet-helper packet path before the release is considered complete.
+The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, and DNS. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement. Run `scripts/validate_runtime_regression.sh --install` before moving on to published-port work.

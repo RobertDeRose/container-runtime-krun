@@ -2,6 +2,7 @@ import ContainerResource
 import ContainerizationError
 import Foundation
 import KrunVMMProtocol
+import Logging
 
 #if canImport(Darwin)
   import Darwin
@@ -22,7 +23,9 @@ public final class KrunVMNetBackend: @unchecked Sendable {
   public static func start(
     attachment: Attachment,
     index: Int,
-    logPath: URL
+    logPath: URL,
+    lifecycleStartedAt: ContinuousClock.Instant,
+    log: Logger
   ) async throws -> KrunVMNetBackend {
     #if !os(macOS)
       throw KrunFeatureGate.unsupported("networking outside macOS")
@@ -43,7 +46,9 @@ public final class KrunVMNetBackend: @unchecked Sendable {
           attachment: attachment,
           macAddress: macAddress.bytes,
           index: index,
-          logPath: logPath
+          logPath: logPath,
+          lifecycleStartedAt: lifecycleStartedAt,
+          log: log
         )
       case "reserved":
         throw ContainerizationError(
@@ -73,7 +78,9 @@ public final class KrunVMNetBackend: @unchecked Sendable {
       attachment: Attachment,
       macAddress: [UInt8],
       index: Int,
-      logPath: URL
+      logPath: URL,
+      lifecycleStartedAt: ContinuousClock.Instant,
+      log: Logger
     ) async throws -> KrunVMNetBackend {
       let helperPath = try resolveHelperPath()
       let directory = try makeDirectory()
@@ -95,8 +102,35 @@ public final class KrunVMNetBackend: @unchecked Sendable {
       process.standardError = logHandle
 
       do {
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "vmnet-helper launch",
+          metadata: [
+            "network": "\(attachment.network)",
+            "network_index": "\(index)",
+          ]
+        )
         try process.run()
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "vmnet-helper launched",
+          metadata: [
+            "network_index": "\(index)",
+            "pid": "\(process.processIdentifier)",
+          ]
+        )
         try await waitUntilReady(process: process, socketPath: socketPath, logPath: logPath)
+        KrunLifecycleTrace.mark(
+          log,
+          startedAt: lifecycleStartedAt,
+          event: "vmnet-helper socket ready",
+          metadata: [
+            "network_index": "\(index)",
+            "socket": "\(socketPath)",
+          ]
+        )
         return KrunVMNetBackend(
           networkConfig: .init(
             socketPath: socketPath,
