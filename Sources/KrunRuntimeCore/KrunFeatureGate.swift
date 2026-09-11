@@ -1,10 +1,10 @@
 import ContainerResource
 import ContainerizationError
 
-public enum KrunV01FeatureGate {
+public enum KrunFeatureGate {
   public static func validate(_ config: ContainerConfiguration) throws {
-    if !config.networks.isEmpty {
-      throw unsupported("networking; use --network none with v0.1")
+    if config.networks.count > 1 {
+      throw unsupported("multiple network attachments")
     }
     if !config.publishedPorts.isEmpty {
       throw unsupported("published TCP/UDP ports")

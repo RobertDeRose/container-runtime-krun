@@ -4,6 +4,7 @@ import ContainerizationError
 import ContainerizationOCI
 import ContainerizationOS
 import Foundation
+import GRPCCore
 import KrunVMMProtocol
 import Logging
 import NIOPosix
@@ -52,6 +53,8 @@ public final class KrunVMController: @unchecked Sendable {
   public static func boot(
     bundle: ContainerResource.Bundle,
     helperPath: String,
+    networkConfigs: [KrunNetworkConfig] = [],
+    networkAttachments: [Attachment] = [],
     libkrunPath: String = KrunDefaults.libkrunPath,
     log: Logger
   ) async throws -> KrunVMController {
@@ -60,7 +63,13 @@ public final class KrunVMController: @unchecked Sendable {
         .unsupported, message: "container-runtime-krun requires Apple Silicon")
     #else
       let config = try bundle.configuration
-      try KrunV01FeatureGate.validate(config)
+      try KrunFeatureGate.validate(config)
+      guard networkConfigs.count == networkAttachments.count else {
+        throw ContainerizationError(
+          .invalidArgument,
+          message: "network config and attachment counts do not match"
+        )
+      }
       let kernel = try bundle.kernel
       let initfs = bundle.initialFilesystem
       let rootfs = try bundle.containerRootfs
@@ -101,7 +110,8 @@ public final class KrunVMController: @unchecked Sendable {
         bootLog: bundle.bootlog.path,
         cpus: UInt8(cpus),
         memoryMiB: UInt32(memoryMiB64),
-        vsockMappings: layout.mappings
+        vsockMappings: layout.mappings,
+        networks: networkConfigs
       )
       let helperConfigPath = bundle.filePath(for: "krun-vmm.json")
       try JSONEncoder().encode(helperConfig).write(to: helperConfigPath)
@@ -138,6 +148,13 @@ public final class KrunVMController: @unchecked Sendable {
             source: "/dev/vdb",
             destination: rootPath
           )
+        )
+        try await configureNetworking(
+          agent: agent,
+          config: config,
+          attachments: networkAttachments,
+          rootPath: rootPath,
+          log: log
         )
         return KrunVMController(
           id: config.id,
@@ -217,9 +234,11 @@ public final class KrunVMController: @unchecked Sendable {
             group: group
           )
           do {
-            // libkrun creates the host UDS before vminitd starts serving.
-            // Require a real RPC so bootstrap cannot race guest readiness.
-            _ = try await agent.containerStatistics(containerIDs: [], categories: [])
+            // libkrun can accept the host UDS before the guest is listening on the
+            // forwarded vsock port. Keep readiness tied to a real vminitd RPC, but
+            // bound each probe so a stale pre-listener connection is discarded and
+            // retried instead of waiting for gRPC's transport failure timeout.
+            try await probeAgentReadiness(agent)
             return agent
           } catch {
             try? await agent.close()
@@ -241,6 +260,20 @@ public final class KrunVMController: @unchecked Sendable {
     )
   }
 
+  private static func probeAgentReadiness(_ agent: Vminitd) async throws {
+    let client = Com_Apple_Containerization_Sandbox_V3_SandboxContext.Client(
+      wrapping: agent.grpcClient
+    )
+    var options = CallOptions.defaults
+    // This bounds one probe, not guest readiness. connectAgent still allows the full
+    // 30-second readiness window and still requires a successful vminitd RPC.
+    options.timeout = .milliseconds(250)
+    _ = try await client.containerStatistics(
+      Com_Apple_Containerization_Sandbox_V3_ContainerStatisticsRequest(),
+      options: options
+    )
+  }
+
   private static func requireExt4Block(_ filesystem: Filesystem, name: String) throws {
     guard case .block(let format, _, _) = filesystem.type, format == "ext4" else {
       throw ContainerizationError(
@@ -248,6 +281,82 @@ public final class KrunVMController: @unchecked Sendable {
         message: "container-runtime-krun v0.1 requires an ext4 block \(name)"
       )
     }
+  }
+
+  private static func configureNetworking(
+    agent: Vminitd,
+    config: ContainerConfiguration,
+    attachments: [Attachment],
+    rootPath: String,
+    log: Logger
+  ) async throws {
+    guard !attachments.isEmpty else { return }
+
+    for (index, attachment) in attachments.enumerated() {
+      let name = "eth\(index)"
+      let mtu = attachment.mtu ?? 1280
+      try await agent.addressAdd(
+        name: name,
+        address: .init(
+          ipv4Address: attachment.ipv4Address,
+          ipv6Address: attachment.ipv6Address
+        )
+      )
+      try await agent.up(name: name, mtu: mtu)
+
+      guard index == 0 else { continue }
+      let gateway = attachment.ipv4Gateway
+      if !attachment.ipv4Address.contains(gateway) {
+        try await agent.routeAddLink(
+          name: name,
+          route: .init(
+            ipv4Destination: gateway,
+            ipv4Source: attachment.ipv4Address.address,
+            ipv6Destination: nil,
+            ipv6Source: nil
+          )
+        )
+      }
+      try await agent.routeAddDefault(
+        name: name,
+        route: .init(ipv4Gateway: gateway, ipv6Gateway: nil)
+      )
+    }
+
+    if let dns = config.dns {
+      let nameservers =
+        dns.nameservers.isEmpty
+        ? [attachments[0].ipv4Gateway.description]
+        : dns.nameservers
+      try await agent.configureDNS(
+        config: DNS(
+          nameservers: nameservers,
+          domain: dns.domain,
+          searchDomains: dns.searchDomains,
+          options: dns.options
+        ),
+        location: rootPath
+      )
+    }
+
+    var hostsEntries = [Hosts.Entry.localHostIPV4()]
+    hostsEntries.append(
+      Hosts.Entry(
+        ipAddress: attachments[0].ipv4Address.address.description,
+        hostnames: [KrunSpecBuilder.hostname(for: config)]
+      )
+    )
+    try await agent.configureHosts(
+      config: Hosts(entries: hostsEntries),
+      location: rootPath
+    )
+    log.debug(
+      "configured libkrun network",
+      metadata: [
+        "ipv4": "\(attachments[0].ipv4Address)",
+        "gateway": "\(attachments[0].ipv4Gateway)",
+      ]
+    )
   }
 
   private static func terminate(_ process: Foundation.Process) {

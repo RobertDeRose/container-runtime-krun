@@ -12,6 +12,25 @@ public struct KrunVsockMapping: Codable, Sendable, Equatable {
   }
 }
 
+public struct KrunNetworkConfig: Codable, Sendable, Equatable {
+  public let socketPath: String
+  public let macAddress: [UInt8]
+  public let features: UInt32
+  public let flags: UInt32
+
+  public init(
+    socketPath: String,
+    macAddress: [UInt8],
+    features: UInt32 = 0,
+    flags: UInt32 = 0
+  ) {
+    self.socketPath = socketPath
+    self.macAddress = macAddress
+    self.features = features
+    self.flags = flags
+  }
+}
+
 public struct KrunVMMConfig: Codable, Sendable, Equatable {
   public let libkrun: String
   public let kernel: String
@@ -22,6 +41,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
   public let cpus: UInt8
   public let memoryMiB: UInt32
   public let vsockMappings: [KrunVsockMapping]
+  public let networks: [KrunNetworkConfig]
 
   public init(
     libkrun: String,
@@ -32,7 +52,8 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     bootLog: String,
     cpus: UInt8,
     memoryMiB: UInt32,
-    vsockMappings: [KrunVsockMapping]
+    vsockMappings: [KrunVsockMapping],
+    networks: [KrunNetworkConfig] = []
   ) {
     self.libkrun = libkrun
     self.kernel = kernel
@@ -43,6 +64,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     self.cpus = cpus
     self.memoryMiB = memoryMiB
     self.vsockMappings = vsockMappings
+    self.networks = networks
   }
 }
 

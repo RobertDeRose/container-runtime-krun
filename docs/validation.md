@@ -1,6 +1,6 @@
-# v0.1 validation plan
+# v0.2 validation plan
 
-The standalone plugin adds one integration layer beyond the already completed libkrun feasibility experiment. Validation should therefore be staged rather than repeating low-level boot debugging for every feature.
+v0.1 validated the standalone runtime lifecycle and memory reclamation. v0.2 keeps those gates and adds a focused network validation layer.
 
 ## Gate 1: installation and discovery
 
@@ -34,11 +34,36 @@ Use a long-running container and exercise:
 - normal process exit and explicit stop;
 - repeated execs to verify stdio ports are returned to the pool.
 
-## Gate 4: statistics
+## Gate 4: allocation-only networking
 
-Run a memory/CPU workload and verify `container stats` reports process, CPU, memory and block-I/O values. Network fields are intentionally absent in v0.1.
+Create a dedicated non-overlapping Apple network using the `allocationOnly` variant:
 
-## Gate 5: memory behavior
+```bash
+container network create \
+  --subnet 192.168.200.0/24 \
+  --option variant=allocationOnly \
+  krun
+```
+
+Choose another private subnet if that range overlaps an existing network. Then verify the libkrun runtime explicitly uses it:
+
+```bash
+container run --rm --runtime container-runtime-krun --network krun alpine:3.20 ip addr show eth0
+container run --rm --runtime container-runtime-krun --network krun alpine:3.20 ip route
+container run --rm --runtime container-runtime-krun --network krun alpine:3.20 cat /etc/resolv.conf
+container run --rm --runtime container-runtime-krun --network krun alpine:3.20 ping -c 1 1.1.1.1
+container run --rm --runtime container-runtime-krun --network krun alpine:3.20 nslookup example.com
+```
+
+Confirm `container list`/`container inspect` expose the Apple-allocated attachment, repeated runs release their allocations, and each container's `vmnet-helper` process is terminated during cleanup.
+
+Also verify that omitting `--network krun` on macOS 26 fails closed with an actionable error for the default `reserved` network rather than attempting `vmnet_interface_start_with_network`.
+
+## Gate 5: statistics
+
+Run a memory/CPU/network workload and verify `container stats --no-stream` reports process, CPU, memory, block-I/O, and network Rx/Tx values.
+
+## Gate 6: memory behavior
 
 Repeat the feasibility workload through the real runtime plugin:
 
@@ -51,11 +76,11 @@ Repeat the feasibility workload through the real runtime plugin:
 
 The acceptance criterion is not an immediate one-for-one RSS drop. libkrun uses `MADV_FREE`; the important property is that released guest backing becomes reclaimable under host pressure while the guest remains usable.
 
-## Gate 6: fail-closed v0.1 boundaries
+## Gate 7: fail-closed v0.2 boundaries
 
 Verify each unsupported feature produces an explicit error before VM startup where possible:
 
-- omit `--network none`;
+- request more than one network attachment;
 - publish a port;
 - add a host/volume mount;
 - request Rosetta;

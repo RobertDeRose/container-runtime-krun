@@ -6,11 +6,11 @@ The project exists to validate and productize one specific advantage demonstrate
 
 No changes to `apple/container` or `apple/containerization` are required. The plugin uses Apple Container's public `runtime` plugin contract.
 
-## v0.1 scope
+## v0.2 scope
 
-v0.1 intentionally targets the smallest useful runtime surface:
+v0.2 keeps the validated v0.1 lifecycle surface and adds the first networking slice:
 
-| Capability | v0.1 |
+| Capability | v0.2 |
 | --- | --- |
 | Boot Apple kernel + vminitd with libkrun | yes |
 | Run initial container process | yes |
@@ -20,7 +20,7 @@ v0.1 intentionally targets the smallest useful runtime surface:
 | signal / stop / wait | yes |
 | container statistics | yes |
 | automatic free-page reporting | yes, provided by libkrun + Apple kernel |
-| Networking | no |
+| Networking | yes, one Apple `container-network-vmnet` `allocationOnly` attachment |
 | Published ports | no |
 | Host/volume/virtiofs mounts | no |
 | Published Unix sockets | no |
@@ -34,7 +34,7 @@ v0.1 intentionally targets the smallest useful runtime surface:
 
 Unsupported features fail with `ContainerizationError(.unsupported)` rather than silently degrading.
 
-Because Apple Container normally attaches a default network, v0.1 must be invoked with `--network none`.
+v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` plugin through `vmnet-helper`. Apple's default macOS 26 `reserved` variant is intentionally unsupported: macOS only permits `vmnet_interface_start_with_network` to consume a serialized network when the consuming executable has the same identity as the executable that created it, while Apple crosses that boundary through Virtualization.framework. `--network none` remains supported.
 
 ## Prerequisites
 
@@ -43,14 +43,18 @@ Because Apple Container normally attaches a default network, v0.1 must be invoke
 - Containerization `0.43.0`
 - Swift 6.2+
 - libkrun 1.19.4
+- `vmnet-helper` when using networking
 - the libkrun Homebrew tap's matching `virglrenderer` (`0.10.4e`), not Homebrew core's newer incompatible ABI
 
-Recommended libkrun installation:
+Recommended libkrun and networking installation:
 
 ```bash
 brew tap libkrun/krun
 brew install libkrun/krun/virglrenderer
 brew install libkrun/krun/libkrun
+brew tap nirs/vmnet-helper
+brew trust nirs/vmnet-helper
+brew install vmnet-helper
 ```
 
 ## Build and install
@@ -87,7 +91,7 @@ container system start
 
 ## Use
 
-Start with the runtime selected explicitly:
+Start with the runtime selected explicitly and networking disabled:
 
 ```bash
 container run --rm \
@@ -96,21 +100,39 @@ container run --rm \
   alpine:3.20 echo hello-from-libkrun
 ```
 
-Once feature parity is sufficient, a separately installed user plugin named `container-runtime-linux` can shadow Apple's bundled runtime. v0.1 deliberately does not install itself that way.
+For networking, create a non-overlapping `allocationOnly` network once and select it explicitly:
+
+```bash
+container network create \
+  --subnet 192.168.200.0/24 \
+  --option variant=allocationOnly \
+  krun
+
+container run --rm \
+  --runtime container-runtime-krun \
+  --network krun \
+  alpine:3.20 ping -c 1 1.1.1.1
+```
+
+Choose a different private subnet if `192.168.200.0/24` overlaps an existing Apple Container network.
+
+Once feature parity is sufficient, a separately installed user plugin named `container-runtime-linux` can shadow Apple's bundled runtime. v0.2 deliberately does not install itself that way.
 
 ## Design constraints
 
 The runtime is one plugin process per Apple Container sandbox. It starts one child `container-krun-vmm-helper` process that owns libkrun and the Hypervisor.framework entitlement.
 
-libkrun's vsock mappings are configured before VM start. v0.1 therefore reserves:
+libkrun's vsock mappings are configured before VM start. v0.2 therefore reserves:
 
 - guest port `1024` for the host-to-guest vminitd control channel;
 - 96 guest-to-host ports beginning at `0x10000000` for process stdio.
 
 The pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
 
+For the first v0.2 networking slice, Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through an external `vmnet-helper` packet backend. The Apple-assigned address, gateway, DNS, hosts entry, and MTU are configured in the guest with vminitd. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`. Published ports and multiple attachments remain intentionally unsupported.
+
 See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 ## Status
 
-The underlying VM path is proven on macOS: Apple kernel boot, vminitd, ext4 block devices, OCI process execution, vsock control, and `VIRTIO_BALLOON_F_REPORTING` all succeeded with libkrun 1.19.4. The standalone plugin packaging and its predeclared stdio bridge are the new v0.1 integration layer and still require end-to-end validation on macOS.
+The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. v0.2 adds explicit `allocationOnly` NAT networking and still requires end-to-end validation of the vmnet-helper packet path before the release is considered complete.

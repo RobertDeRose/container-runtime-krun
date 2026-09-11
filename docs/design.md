@@ -1,10 +1,10 @@
-# v0.1 design
+# v0.2 design
 
 ## Objective
 
 Provide a standalone Apple Container runtime handler that uses libkrun without requiring modifications to either `apple/container` or `apple/containerization`.
 
-The design optimizes for a narrow, testable runtime rather than immediate feature parity. The first milestone is to make ordinary non-networked `container run` and `container exec` workloads work while preserving the memory-reclamation behavior demonstrated by the feasibility experiment.
+The design continues to optimize for narrow, testable increments rather than immediate feature parity. v0.1 established lifecycle and memory reclamation; v0.2 adds explicit NAT networking through Apple's `allocationOnly` network variant without changing the runtime plugin boundary.
 
 ## Extension boundary
 
@@ -53,16 +53,18 @@ This split is deliberate:
 On `bootstrap`:
 
 1. Materialize the normal Apple runtime bundle from `runtime-configuration.json` if needed.
-2. Reject v0.1-incompatible configuration before starting a VM.
-3. Create a short private directory under `/tmp` for Unix sockets.
-4. Predeclare the vminitd and stdio vsock mappings in the helper configuration.
-5. Start `container-krun-vmm-helper`.
-6. Connect to guest port 1024 through libkrun's Unix proxy.
-7. Require a successful read-only vminitd RPC before considering the guest ready.
-8. Run `Vminitd.standardSetup()` and the stock runtime sysctls.
-9. Mount `/dev/vdb` at `/run/container/<id>/rootfs`.
-10. Record the init-process configuration and XPC-provided stdio handles without creating the guest process.
-11. Transition the runtime to `booted` and return from `bootstrap`.
+2. Reject unsupported v0.2 configuration before starting a VM.
+3. If a network is requested, allocate it through Apple's network plugin and attach libkrun to the resulting vmnet network.
+4. Create a short private directory under `/tmp` for Unix sockets.
+5. Predeclare the vminitd, stdio, and virtio-net mappings in the helper configuration.
+6. Start `container-krun-vmm-helper`.
+7. Connect to guest port 1024 through libkrun's Unix proxy.
+8. Require a successful read-only vminitd RPC before considering the guest ready.
+9. Run `Vminitd.standardSetup()` and the stock runtime sysctls.
+10. Mount `/dev/vdb` at `/run/container/<id>/rootfs`.
+11. Configure `eth0`, routes, DNS, and `/etc/hosts` from the Apple network allocation.
+12. Record the init-process configuration and XPC-provided stdio handles without creating the guest process.
+13. Transition the runtime to `booted` and return from `bootstrap`.
 
 The helper attaches the initfs as `/dev/vda` and rootfs as `/dev/vdb`. The kernel command line retains Apple's vminitd contract:
 
@@ -71,6 +73,16 @@ console=hvc0 ... init=/sbin/vminitd ro rootfstype=ext4 root=/dev/vda
 ```
 
 The helper disables libkrun's implicit vsock because its macOS default enables TSI when no virtio-net device exists. It then creates a plain virtio-vsock with TSI flags zero. It also disables the implicit console so the explicit boot-log console is `hvc0`.
+
+## Networking
+
+v0.2 keeps Apple Container's network plugin as the source of truth for attachment allocation and lifetime. The runtime opens a persistent `ContainerNetworkClient` session and requests the configured hostname/MAC, yielding the same `Attachment` data the stock runtime consumes.
+
+Apple's network plugin remains authoritative for attachment allocation and lifetime. For `allocationOnly`, libkrun needs a packet backend, so the runtime launches `vmnet-helper` in shared+isolated mode on the allocated subnet and passes its Unix datagram socket plus the Apple-allocated MAC to `krun_add_net_unixgram`. No second IPAM layer is introduced.
+
+After vminitd is ready, the controller applies the Apple attachment to `eth0`: address, MTU, any required link route, default route, DNS, and the container hostname entry. Network statistics come from vminitd's existing cgroup/network stats surface.
+
+The first slice intentionally supports one `container-network-vmnet` attachment using the `allocationOnly` variant on macOS 26. Multiple attachments, published ports, and network performance offloads remain follow-up work. `--network none` continues to work without a packet backend. The default macOS 26 `reserved` variant is rejected: `vmnet_interface_start_with_network` requires the consumer of a serialized network to have the same executable identity as the process that created it, and Apple's stock runtime crosses that boundary through Virtualization.framework rather than raw vmnet I/O.
 
 ## Process lifecycle
 
@@ -94,7 +106,7 @@ The generated spec preserves the stock runtime's important baseline:
 
 Containerization's `LinuxProcess` normally asks `VirtualMachineInstance.listen()` for dynamic vsock ports. A standalone runtime cannot construct Containerization's `VsockListener`, and libkrun 1.19.4 configures Unix-vsock mappings before VM start.
 
-v0.1 avoids both constraints with a fixed pool:
+The runtime avoids both constraints with a fixed pool:
 
 ```text
 1024                    host -> guest    vminitd gRPC
@@ -134,17 +146,17 @@ There is no runtime-side balloon controller. That is intentional.
 
 The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO_BALLOON_F_REPORTING`. Once negotiated, Linux reports unused pages and libkrun marks the corresponding host mappings with `MADV_FREE` on macOS. Host reclamation therefore follows guest memory availability without an application-level feedback loop or a second state machine.
 
-## v0.1 unsupported surface
+## v0.2 unsupported surface
 
-Networking, published ports, host mounts, published sockets, arbitrary `dial`, copy, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors.
+Multiple network attachments, published ports, host mounts, published sockets, arbitrary `dial`, copy, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors.
 
-This is intentional. v0.1 should establish reliability and quantify benefits before adding parity work.
+This is intentional. The initial v0.2 slice proves the packet path and Apple-IPAM integration before adding port forwarding or broader network variants.
 
 ## Next milestones
 
-### v0.2: networking
+### v0.2 follow-ups
 
-Translate Apple network-plugin allocations into libkrun's virtio-net Unix-stream backend. Validate normal outbound connectivity, DNS, isolation semantics, and published ports before enabling networking by default.
+Validate outbound connectivity, DNS, allocation-only isolation semantics, network statistics, and cleanup under repeated container creation. Then add published ports and decide whether multiple attachments are justified. Supporting Apple's `reserved` variant would require a network-plugin-side integration or an upstream capability rather than another runtime-side vmnet bridge.
 
 ### v0.3: host integration
 

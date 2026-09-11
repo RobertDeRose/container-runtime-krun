@@ -16,11 +16,26 @@ import Testing
     vsockMappings: [
       .init(port: 1024, path: "/tmp/vminit", listen: true),
       .init(port: 0x1000_0000, path: "/tmp/p00", listen: false),
+    ],
+    networks: [
+      .init(
+        socketPath: "/tmp/net0.sock",
+        macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
+      )
     ]
   )
   let data = try JSONEncoder().encode(original)
   let decoded = try JSONDecoder().decode(KrunVMMConfig.self, from: data)
   #expect(decoded == original)
+}
+
+@Test func networkConfigDefaultsToNoOffloadFlags() {
+  let network = KrunNetworkConfig(
+    socketPath: "/tmp/net0.sock",
+    macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
+  )
+  #expect(network.features == 0)
+  #expect(network.flags == 0)
 }
 
 @Test func defaultsReserveControlAndStdioSeparately() {

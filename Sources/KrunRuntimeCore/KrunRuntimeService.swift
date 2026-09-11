@@ -1,3 +1,4 @@
+import ContainerNetworkClient
 import ContainerResource
 import ContainerRuntimeClient
 import ContainerXPC
@@ -41,6 +42,9 @@ public actor KrunRuntimeService {
   private var portPool: KrunPortPool?
   private var processes: [String: ProcessRecord] = [:]
   private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+  private var networkSessions: [XPCClientSession] = []
+  private var networkAttachments: [Attachment] = []
+  private var networkBackends: [KrunVMNetBackend] = []
 
   public init(
     root: URL,
@@ -69,18 +73,29 @@ public actor KrunRuntimeService {
         .invalidState, message: "runtime is not in a bootstrappable state")
     }
     let networkInfos = try message.networkBootstrapInfos()
-    guard networkInfos.isEmpty else {
-      throw KrunV01FeatureGate.unsupported("networking; use --network none with v0.1")
-    }
 
     let bundle = try ensureBundle()
     let containerConfig = try bundle.configuration
-    try KrunV01FeatureGate.validate(containerConfig)
-    let controller = try await KrunVMController.boot(
-      bundle: bundle,
-      helperPath: helperPath,
-      log: log
+    try KrunFeatureGate.validate(containerConfig)
+    let networkResources = try await prepareNetworking(
+      config: containerConfig,
+      networkInfos: networkInfos,
+      bundle: bundle
     )
+    let controller: KrunVMController
+    do {
+      controller = try await KrunVMController.boot(
+        bundle: bundle,
+        helperPath: helperPath,
+        networkConfigs: networkResources.backends.map(\.networkConfig),
+        networkAttachments: networkResources.attachments,
+        log: log
+      )
+    } catch {
+      for backend in networkResources.backends { backend.stop() }
+      for session in networkResources.sessions { session.close() }
+      throw error
+    }
     let pool = KrunPortPool(entries: controller.socketLayout.ioEntries)
     let stdio = message.stdioHandles()
 
@@ -90,6 +105,9 @@ public actor KrunRuntimeService {
     self.vm = controller
     self.config = containerConfig
     self.portPool = pool
+    self.networkSessions = networkResources.sessions
+    self.networkAttachments = networkResources.attachments
+    self.networkBackends = networkResources.backends
     self.processes = [
       containerConfig.id: ProcessRecord(
         configuration: containerConfig.initProcess,
@@ -208,11 +226,15 @@ public actor KrunRuntimeService {
         ContainerSnapshot(
           configuration: config,
           status: .running,
-          networks: []
+          networks: networkAttachments
         )
       ]
     }
-    let snapshot = SandboxSnapshot(status: runtimeStatus, networks: [], containers: containers)
+    let snapshot = SandboxSnapshot(
+      status: runtimeStatus,
+      networks: runtimeStatus == .running ? networkAttachments : [],
+      containers: containers
+    )
     let reply = message.reply()
     reply.set(key: RuntimeKeys.snapshot.rawValue, value: try JSONEncoder().encode(snapshot))
     return reply
@@ -278,7 +300,7 @@ public actor KrunRuntimeService {
     guard let controller = vm, let config else {
       throw ContainerizationError(.invalidState, message: "runtime is not booted")
     }
-    let categories: StatCategory = [.process, .memory, .cpu, .blockIO]
+    let categories: StatCategory = [.process, .memory, .cpu, .blockIO, .network]
     let stats = try await controller.agent.containerStatistics(
       containerIDs: [config.id],
       categories: categories
@@ -288,8 +310,8 @@ public actor KrunRuntimeService {
       memoryUsageBytes: stats?.memory?.usageBytes,
       memoryLimitBytes: stats?.memory?.limitBytes,
       cpuUsageUsec: stats?.cpu?.usageUsec,
-      networkRxBytes: nil,
-      networkTxBytes: nil,
+      networkRxBytes: stats?.networks?.reduce(0) { $0 + $1.receivedBytes },
+      networkTxBytes: stats?.networks?.reduce(0) { $0 + $1.transmittedBytes },
       blockReadBytes: stats?.blockIO?.devices.reduce(0) { $0 + $1.readBytes },
       blockWriteBytes: stats?.blockIO?.devices.reduce(0) { $0 + $1.writeBytes },
       numProcesses: stats?.process?.current
@@ -356,7 +378,7 @@ public actor KrunRuntimeService {
   }
 
   private func unsupported(_ route: String) -> ContainerizationError {
-    KrunV01FeatureGate.unsupported("runtime route \(route)")
+    KrunFeatureGate.unsupported("runtime route \(route)")
   }
 
   private func waitForProcess(_ id: String) async throws -> ExitStatus {
@@ -443,8 +465,83 @@ public actor KrunRuntimeService {
       try? await controller.agent.deleteProcess(id: containerID, containerID: containerID)
     }
     await controller.shutdownVMM()
+    for backend in networkBackends { backend.stop() }
+    networkBackends = []
+    for session in networkSessions { session.close() }
+    networkSessions = []
+    networkAttachments = []
     state = .stopped
     releaseStopWaiters()
+  }
+
+  private struct NetworkResources {
+    let sessions: [XPCClientSession]
+    let attachments: [Attachment]
+    let backends: [KrunVMNetBackend]
+  }
+
+  private func prepareNetworking(
+    config: ContainerConfiguration,
+    networkInfos: [NetworkBootstrapInfo],
+    bundle: ContainerResource.Bundle
+  ) async throws -> NetworkResources {
+    guard config.networks.count == networkInfos.count else {
+      throw ContainerizationError(
+        .invalidArgument,
+        message: "network configuration and bootstrap info counts do not match"
+      )
+    }
+    guard !networkInfos.isEmpty else {
+      return NetworkResources(sessions: [], attachments: [], backends: [])
+    }
+
+    var sessions: [XPCClientSession] = []
+    var attachments: [Attachment] = []
+    var backends: [KrunVMNetBackend] = []
+    do {
+      for (index, info) in networkInfos.enumerated() {
+        guard info.plugin == "container-network-vmnet" else {
+          throw KrunFeatureGate.unsupported("network plugin \(info.plugin)")
+        }
+        let attachmentConfig = config.networks[index]
+        let client = NetworkClient(id: attachmentConfig.network, plugin: info.plugin)
+        let session = client.connect()
+        sessions.append(session)
+        var (attachment, _) = try await client.allocate(
+          hostname: attachmentConfig.options.hostname,
+          macAddress: attachmentConfig.options.macAddress,
+          on: session
+        )
+        if let mtu = attachmentConfig.options.mtu {
+          attachment = Attachment(
+            network: attachment.network,
+            hostname: attachment.hostname,
+            ipv4Address: attachment.ipv4Address,
+            ipv4Gateway: attachment.ipv4Gateway,
+            ipv6Address: attachment.ipv6Address,
+            macAddress: attachment.macAddress,
+            mtu: mtu,
+            variant: attachment.variant
+          )
+        }
+        let backend = try await KrunVMNetBackend.start(
+          attachment: attachment,
+          index: index,
+          logPath: bundle.filePath(for: "krun-vmnet-\(index).log")
+        )
+        attachments.append(attachment)
+        backends.append(backend)
+      }
+      return NetworkResources(
+        sessions: sessions,
+        attachments: attachments,
+        backends: backends
+      )
+    } catch {
+      for backend in backends { backend.stop() }
+      for session in sessions { session.close() }
+      throw error
+    }
   }
 
   private func waitForStopCompletion() async {

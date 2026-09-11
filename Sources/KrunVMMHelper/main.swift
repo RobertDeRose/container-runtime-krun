@@ -21,6 +21,15 @@ private final class KrunLibrary {
     @convention(c) (UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?, Bool) -> Int32
   typealias AddVsock = @convention(c) (UInt32, UInt32) -> Int32
   typealias AddVsockPort = @convention(c) (UInt32, UInt32, UnsafePointer<CChar>?, Bool) -> Int32
+  typealias AddNetUnixgram =
+    @convention(c) (
+      UInt32,
+      UnsafePointer<CChar>?,
+      Int32,
+      UnsafeMutablePointer<UInt8>?,
+      UInt32,
+      UInt32
+    ) -> Int32
   typealias AddConsole = @convention(c) (UInt32, Int32, Int32, Int32) -> Int32
   typealias SetKernel =
     @convention(c) (
@@ -41,6 +50,7 @@ private final class KrunLibrary {
   let addDisk: AddDisk
   let addVsock: AddVsock
   let addVsockPort: AddVsockPort
+  let addNetUnixgram: AddNetUnixgram
   let disableImplicitConsole: ToggleImplicitDevice
   let addConsole: AddConsole
   let setKernel: SetKernel
@@ -61,6 +71,8 @@ private final class KrunLibrary {
     self.addDisk = try Self.load(handle, "krun_add_disk", as: AddDisk.self)
     self.addVsock = try Self.load(handle, "krun_add_vsock", as: AddVsock.self)
     self.addVsockPort = try Self.load(handle, "krun_add_vsock_port2", as: AddVsockPort.self)
+    self.addNetUnixgram = try Self.load(
+      handle, "krun_add_net_unixgram", as: AddNetUnixgram.self)
     self.disableImplicitConsole = try Self.load(
       handle, "krun_disable_implicit_console", as: ToggleImplicitDevice.self)
     self.addConsole = try Self.load(handle, "krun_add_virtio_console_default", as: AddConsole.self)
@@ -118,6 +130,28 @@ private func run(config: KrunVMMConfig) throws -> Never {
         krun.addVsockPort(context, mapping.port, path, mapping.listen),
         "krun_add_vsock_port2(\(mapping.port))"
       )
+    }
+  }
+
+  for (index, network) in config.networks.enumerated() {
+    guard network.macAddress.count == 6 else {
+      throw KrunError(description: "network \(index) MAC address must contain 6 bytes")
+    }
+    var mac = network.macAddress
+    try withCString(network.socketPath) { path in
+      try mac.withUnsafeMutableBufferPointer { bytes in
+        try checked(
+          krun.addNetUnixgram(
+            context,
+            path,
+            -1,
+            bytes.baseAddress,
+            network.features,
+            network.flags
+          ),
+          "krun_add_net_unixgram(net\(index))"
+        )
+      }
     }
   }
 

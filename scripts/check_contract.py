@@ -42,6 +42,7 @@ required_symbols = {
     "krun_disable_implicit_vsock",
     "krun_add_vsock",
     "krun_add_vsock_port2",
+    "krun_add_net_unixgram",
     "krun_add_disk",
     "krun_disable_implicit_console",
     "krun_add_virtio_console_default",
@@ -55,6 +56,10 @@ if missing_symbols:
 
 if 'type = "runtime"' not in config:
     print("plugin config does not declare a runtime service", file=sys.stderr)
+    raise SystemExit(1)
+
+if "ContainerNetworkClient" not in (ROOT / "Package.swift").read_text():
+    print("runtime target is missing ContainerNetworkClient", file=sys.stderr)
     raise SystemExit(1)
 
 runtime_service = (ROOT / "Sources/KrunRuntimeCore/KrunRuntimeService.swift").read_text()
@@ -178,6 +183,50 @@ if "if !isInit" in start_body:
     print("init and exec must share the same create/start lifecycle", file=sys.stderr)
     raise SystemExit(1)
 
+if "prepareNetworking(" not in bootstrap_body:
+    print("bootstrap must allocate network attachments before VM boot", file=sys.stderr)
+    raise SystemExit(1)
+if "networkAttachments: networkResources.attachments" not in bootstrap_body:
+    print("VM boot must receive allocated network attachments", file=sys.stderr)
+    raise SystemExit(1)
+
+
+vmnet_backend = (ROOT / "Sources/KrunRuntimeCore/KrunVMNetBackend.swift").read_text()
+for required in (
+    'case "allocationOnly"',
+    'case "reserved"',
+    'variant=allocationOnly',
+    '"--operation-mode", "shared"',
+    '"--enable-isolation"',
+):
+    if required not in vmnet_backend:
+        print(f"vmnet backend is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+for forbidden in (
+    "vmnet_network_create_with_serialization",
+    "vmnet_interface_start_with_network(",
+    "vmnet_read(",
+    "vmnet_write(",
+):
+    if forbidden in vmnet_backend:
+        print(
+            f"runtime must not attempt reserved-network raw vmnet I/O: found {forbidden}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+vm_controller = (ROOT / "Sources/KrunRuntimeCore/KrunVMController.swift").read_text()
+for required in (
+    "agent.addressAdd(",
+    "agent.up(",
+    "agent.routeAddDefault(",
+    "agent.configureDNS(",
+    "agent.configureHosts(",
+):
+    if required not in vm_controller:
+        print(f"guest network setup is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 print(
-    "PASS: runtime routes, helper ABI surface, plugin type, wait durability, stop coordination, process-agent isolation, and lifecycle alignment are complete"
+    "PASS: runtime routes, helper ABI surface, plugin type, lifecycle durability, and v0.2 allocation-only network wiring are complete"
 )
