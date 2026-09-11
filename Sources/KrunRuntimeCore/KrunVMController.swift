@@ -22,7 +22,7 @@ public final class KrunVMController: @unchecked Sendable {
   public let agent: Vminitd
 
   private let helper: Foundation.Process
-  private let group: MultiThreadedEventLoopGroup
+  let eventLoopGroup: MultiThreadedEventLoopGroup
   private let log: Logger
   private let helperLogHandle: FileHandle
 
@@ -45,7 +45,7 @@ public final class KrunVMController: @unchecked Sendable {
     self.socketLayout = socketLayout
     self.agent = agent
     self.helper = helper
-    self.group = group
+    self.eventLoopGroup = group
     self.log = log
     self.helperLogHandle = helperLogHandle
   }
@@ -243,7 +243,7 @@ public final class KrunVMController: @unchecked Sendable {
       socketPath: socketLayout.controlPath,
       helper: helper,
       helperLogPath: bundle.filePath(for: "krun-vmm.log"),
-      group: group,
+      group: eventLoopGroup,
       log: log,
       lifecycleStartedAt: nil
     )
@@ -253,7 +253,7 @@ public final class KrunVMController: @unchecked Sendable {
     try? await agent.close()
     Self.terminate(helper)
     try? helperLogHandle.close()
-    try? await group.shutdownGracefully()
+    try? await eventLoopGroup.shutdownGracefully()
     try? FileManager.default.removeItem(at: socketLayout.directory)
   }
 

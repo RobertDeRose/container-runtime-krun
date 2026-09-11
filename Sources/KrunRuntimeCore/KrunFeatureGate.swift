@@ -6,8 +6,8 @@ public enum KrunFeatureGate {
     if config.networks.count > 1 {
       throw unsupported("multiple network attachments")
     }
-    if !config.publishedPorts.isEmpty {
-      throw unsupported("published TCP/UDP ports")
+    if !config.publishedPorts.isEmpty && config.networks.isEmpty {
+      throw unsupported("published TCP/UDP ports without a network attachment")
     }
     if !config.publishedSockets.isEmpty {
       throw unsupported("published Unix sockets")

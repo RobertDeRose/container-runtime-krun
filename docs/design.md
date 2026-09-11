@@ -82,7 +82,15 @@ Apple's network plugin remains authoritative for attachment allocation and lifet
 
 After vminitd is ready, the controller applies the Apple attachment to `eth0`: address, MTU, any required link route, default route, DNS, and the container hostname entry. Network statistics come from vminitd's existing cgroup/network stats surface.
 
-The first slice intentionally supports one `container-network-vmnet` attachment using the `allocationOnly` variant on macOS 26. Multiple attachments, published ports, and network performance offloads remain follow-up work. `--network none` continues to work without a packet backend. The default macOS 26 `reserved` variant is rejected: `vmnet_interface_start_with_network` requires the consumer of a serialized network to have the same executable identity as the process that created it, and Apple's stock runtime crosses that boundary through Virtualization.framework rather than raw vmnet I/O.
+The first slice intentionally supports one `container-network-vmnet` attachment using the `allocationOnly` variant on macOS 26. Published TCP/UDP ports target that first attachment. Multiple attachments and network performance offloads remain follow-up work. `--network none` continues to work without a packet backend, but cannot publish ports because there is no guest IP to target. The default macOS 26 `reserved` variant is rejected: `vmnet_interface_start_with_network` requires the consumer of a serialized network to have the same executable identity as the process that created it, and Apple's stock runtime crosses that boundary through Virtualization.framework rather than raw vmnet I/O.
+
+## Published TCP/UDP ports
+
+Published ports reuse Apple Container's public `SocketForwarder` product rather than introducing a libkrun-specific forwarding protocol. After Apple allocation and guest network setup, the runtime binds each requested host address/port with `TCPForwarder` or `UDPForwarder` and forwards it to the Apple-assigned guest address on the first attachment. Port ranges use the existing `PublishPort.count` semantics.
+
+The forwarders share the controller's NIO event-loop group and are closed before the VMM, vmnet backend, and Apple network session are torn down. If a later bind fails after earlier ports were opened, the runtime closes those already-created forwarders before returning the error. IPv6 publication requires the Apple attachment to contain an IPv6 address.
+
+Apple's stock runtime also invokes its package-scoped `LocalNetworkPrivacy` helper before binding published ports. A standalone runtime plugin cannot import that helper, so this runtime does not copy the private implementation speculatively; the normal Apple `SocketForwarder` path is used and validated on macOS.
 
 ## Process lifecycle
 
@@ -134,9 +142,11 @@ Teardown follows the ordering established by the feasibility experiment:
 5. unmount the rootfs;
 6. sync the guest;
 7. delete the vminitd container process;
-8. close the vminitd channel;
-9. terminate the VMM helper;
-10. remove the private Unix-socket directory.
+8. close all published-port forwarders;
+9. close the vminitd channel;
+10. terminate the VMM helper;
+11. stop the vmnet packet backend and close the Apple network session;
+12. remove the private Unix-socket directory.
 
 The VM ownership is cleared before asynchronous cleanup begins so a concurrent API-server `wait` and user `stop` cannot perform teardown twice.
 
@@ -148,15 +158,15 @@ The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO
 
 ## v0.2 unsupported surface
 
-Multiple network attachments, published ports, host mounts, published sockets, arbitrary `dial`, copy, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors.
+Multiple network attachments, host mounts, published Unix sockets, arbitrary `dial`, copy, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors.
 
-This is intentional. The initial v0.2 slice proves the packet path and Apple-IPAM integration before adding port forwarding or broader network variants.
+This is intentional. v0.2 keeps the working packet path and published TCP/UDP forwarding narrow while deferring unrelated host-integration and multi-network work.
 
 ## Next milestones
 
 ### v0.2 follow-ups
 
-Validate outbound connectivity, DNS, allocation-only isolation semantics, network statistics, and cleanup under repeated container creation. Then add published ports and decide whether multiple attachments are justified. Supporting Apple's `reserved` variant would require a network-plugin-side integration or an upstream capability rather than another runtime-side vmnet bridge.
+Validate outbound connectivity, DNS, network statistics, repeated cleanup, and published TCP/UDP forwarding on the allocation-only path. Once those gates pass, the one-attachment v0.2 networking scope is complete. Multiple attachments should be added only if a concrete use case justifies them. Supporting Apple's `reserved` variant would require a network-plugin-side integration or an upstream capability rather than another runtime-side vmnet bridge.
 
 ### v0.3: host integration
 

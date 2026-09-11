@@ -6,6 +6,8 @@ import Containerization
 import ContainerizationError
 import Foundation
 import Logging
+import NIOCore
+import SocketForwarder
 
 #if canImport(Darwin)
   import Darwin
@@ -45,6 +47,7 @@ public actor KrunRuntimeService {
   private var networkSessions: [XPCClientSession] = []
   private var networkAttachments: [Attachment] = []
   private var networkBackends: [KrunVMNetBackend] = []
+  private var socketForwarders: [SocketForwarderResult] = []
   private var lifecycleStartedAt: ContinuousClock.Instant?
 
   public init(
@@ -103,6 +106,20 @@ public actor KrunRuntimeService {
       for session in networkResources.sessions { session.close() }
       throw error
     }
+    let forwarders: [SocketForwarderResult]
+    do {
+      forwarders = try await startSocketForwarders(
+        attachment: networkResources.attachments.first,
+        publishedPorts: containerConfig.publishedPorts,
+        eventLoopGroup: controller.eventLoopGroup
+      )
+    } catch {
+      await controller.shutdownVMM()
+      for backend in networkResources.backends { backend.stop() }
+      for session in networkResources.sessions { session.close() }
+      throw error
+    }
+
     let pool = KrunPortPool(entries: controller.socketLayout.ioEntries)
     let stdio = message.stdioHandles()
 
@@ -115,6 +132,7 @@ public actor KrunRuntimeService {
     self.networkSessions = networkResources.sessions
     self.networkAttachments = networkResources.attachments
     self.networkBackends = networkResources.backends
+    self.socketForwarders = forwarders
     self.processes = [
       containerConfig.id: ProcessRecord(
         configuration: containerConfig.initProcess,
@@ -497,6 +515,7 @@ public actor KrunRuntimeService {
       try? await controller.agent.sync()
       try? await controller.agent.deleteProcess(id: containerID, containerID: containerID)
     }
+    await stopSocketForwarders()
     await controller.shutdownVMM()
     for backend in networkBackends { backend.stop() }
     networkBackends = []
@@ -505,6 +524,112 @@ public actor KrunRuntimeService {
     networkAttachments = []
     state = .stopped
     releaseStopWaiters()
+  }
+
+  private func startSocketForwarders(
+    attachment: Attachment?,
+    publishedPorts: [PublishPort],
+    eventLoopGroup: any EventLoopGroup
+  ) async throws -> [SocketForwarderResult] {
+    guard !publishedPorts.isEmpty else { return [] }
+    guard let attachment else {
+      throw ContainerizationError(
+        .invalidArgument,
+        message: "published ports require a network attachment"
+      )
+    }
+    guard !publishedPorts.hasOverlaps() else {
+      throw ContainerizationError(
+        .invalidArgument,
+        message: "host ports for different publish port specs may not overlap"
+      )
+    }
+
+    var forwarders: [SocketForwarderResult] = []
+    do {
+      for publishedPort in publishedPorts {
+        for offset in 0..<publishedPort.count {
+          let proxyAddress = try SocketAddress(
+            ipAddress: publishedPort.hostAddress.description,
+            port: Int(publishedPort.hostPort + offset)
+          )
+          let containerIPAddress: String
+          switch publishedPort.hostAddress {
+          case .v4(_):
+            containerIPAddress = attachment.ipv4Address.address.description
+          case .v6(_):
+            guard let ipv6Address = attachment.ipv6Address else {
+              throw ContainerizationError(
+                .invalidState,
+                message: "cannot configure IPv6 port forwarding for container with unknown IPv6 address"
+              )
+            }
+            containerIPAddress = ipv6Address.address.description
+          }
+          let serverAddress = try SocketAddress(
+            ipAddress: containerIPAddress,
+            port: Int(publishedPort.containerPort + offset)
+          )
+          log.info(
+            "creating port forwarder",
+            metadata: [
+              "protocol": "\(publishedPort.proto.rawValue)",
+              "proxy": "\(proxyAddress)",
+              "server": "\(serverAddress)",
+            ]
+          )
+
+          let forwarder: any SocketForwarder
+          switch publishedPort.proto {
+          case .tcp:
+            forwarder = try TCPForwarder(
+              proxyAddress: proxyAddress,
+              serverAddress: serverAddress,
+              eventLoopGroup: eventLoopGroup,
+              log: log
+            )
+          case .udp:
+            forwarder = try UDPForwarder(
+              proxyAddress: proxyAddress,
+              serverAddress: serverAddress,
+              eventLoopGroup: eventLoopGroup,
+              log: log
+            )
+          }
+
+          do {
+            forwarders.append(try await forwarder.run().get())
+          } catch let error as IOError where error.errnoCode == EACCES {
+            if let port = proxyAddress.port, port < 1024 {
+              throw ContainerizationError(
+                .invalidArgument,
+                message: "permission denied while binding host port \(port); ports below 1024 require root privileges"
+              )
+            }
+            throw error
+          }
+        }
+      }
+      return forwarders
+    } catch {
+      await closeSocketForwarders(forwarders)
+      throw error
+    }
+  }
+
+  private func stopSocketForwarders() async {
+    let forwarders = socketForwarders
+    socketForwarders = []
+    await closeSocketForwarders(forwarders)
+  }
+
+  private func closeSocketForwarders(_ forwarders: [SocketForwarderResult]) async {
+    for forwarder in forwarders {
+      forwarder.close()
+    }
+    for forwarder in forwarders {
+      try? await forwarder.wait()
+    }
   }
 
   private struct NetworkResources {

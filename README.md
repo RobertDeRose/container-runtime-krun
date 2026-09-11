@@ -21,7 +21,7 @@ v0.2 keeps the validated v0.1 lifecycle surface and adds the first networking sl
 | container statistics | yes |
 | automatic free-page reporting | yes, provided by libkrun + Apple kernel |
 | Networking | yes, one Apple `container-network-vmnet` `allocationOnly` attachment |
-| Published ports | no |
+| Published TCP/UDP ports | yes, through Apple `SocketForwarder` on the first attachment |
 | Host/volume/virtiofs mounts | no |
 | Published Unix sockets | no |
 | Arbitrary runtime `dial(port)` | no |
@@ -114,6 +114,16 @@ container run --rm \
   alpine:3.20 ping -c 1 1.1.1.1
 ```
 
+TCP and UDP ports can be published through the same Apple `SocketForwarder` implementation used by the stock runtime:
+
+```bash
+container run --rm \
+  --runtime container-runtime-krun \
+  --network krun \
+  --publish 127.0.0.1:8080:80/tcp \
+  nginx:alpine
+```
+
 Choose a different private subnet if `192.168.200.0/24` overlaps an existing Apple Container network.
 
 Once feature parity is sufficient, a separately installed user plugin named `container-runtime-linux` can shadow Apple's bundled runtime. v0.2 deliberately does not install itself that way.
@@ -129,10 +139,10 @@ libkrun's vsock mappings are configured before VM start. v0.2 therefore reserves
 
 The pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
 
-For the first v0.2 networking slice, Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through an external `vmnet-helper` packet backend. The Apple-assigned address, gateway, DNS, hosts entry, and MTU are configured in the guest with vminitd. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`. Published ports and multiple attachments remain intentionally unsupported.
+For the first v0.2 networking slice, Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through an external `vmnet-helper` packet backend. The Apple-assigned address, gateway, DNS, hosts entry, and MTU are configured in the guest with vminitd. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`. Published TCP/UDP ports reuse Apple Container's `SocketForwarder` implementation and target the Apple-assigned address on the first attachment. Multiple attachments remain intentionally unsupported.
 
 See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 ## Status
 
-The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, and DNS. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement. Run `scripts/validate_runtime_regression.sh --install` before moving on to published-port work.
+The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, and DNS. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement. The full networked v0.1 lifecycle regression also passes, including stats and repeated cleanup. Run `scripts/validate_port_forwarding.sh --install` to validate the final v0.2 TCP/UDP publish slice.
