@@ -204,7 +204,8 @@ public actor KrunRuntimeService {
         container: containerConfig,
         process: record.configuration,
         rootPath: controller.rootPath,
-        volumeAttachments: controller.volumeAttachments
+        volumeAttachments: controller.volumeAttachments,
+        wrapWithInit: isInit && containerConfig.useInit
       )
       try await processAgent.createProcess(
         id: id,

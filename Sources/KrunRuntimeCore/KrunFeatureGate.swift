@@ -25,9 +25,6 @@ public enum KrunFeatureGate {
     if config.ssh {
       throw unsupported("SSH agent forwarding")
     }
-    if config.useInit {
-      throw unsupported("--init")
-    }
     for mount in config.mounts {
       switch mount.type {
       case .tmpfs:

@@ -8,13 +8,15 @@ public enum KrunSpecBuilder {
   public static func make(
     container: ContainerConfiguration,
     process: ProcessConfiguration,
-    rootPath: String
+    rootPath: String,
+    wrapWithInit: Bool = false
   ) throws -> Spec {
     try make(
       container: container,
       process: process,
       rootPath: rootPath,
-      volumeAttachments: []
+      volumeAttachments: [],
+      wrapWithInit: wrapWithInit
     )
   }
 
@@ -22,7 +24,8 @@ public enum KrunSpecBuilder {
     container: ContainerConfiguration,
     process: ProcessConfiguration,
     rootPath: String,
-    volumeAttachments: [KrunVolumeAttachment]
+    volumeAttachments: [KrunVolumeAttachment],
+    wrapWithInit: Bool = false
   ) throws -> Spec {
     let safe = ["nosuid", "noexec", "nodev"]
     var mounts: [ContainerizationOCI.Mount] = [
@@ -49,6 +52,16 @@ public enum KrunSpecBuilder {
       for: container,
       attachments: volumeAttachments
     ))
+    if wrapWithInit {
+      mounts.append(
+        .init(
+          type: "bind",
+          source: "/sbin/vminitd",
+          destination: "/.cz-init",
+          options: ["bind", "ro"]
+        )
+      )
+    }
 
     let caps = try effectiveCapabilities(capAdd: container.capAdd, capDrop: container.capDrop)
     let user: ContainerizationOCI.User
@@ -71,8 +84,10 @@ public enum KrunSpecBuilder {
       )
     }
 
+    let arguments =
+      (wrapWithInit ? ["/.cz-init", "--"] : []) + [process.executable] + process.arguments
     let ociProcess = ContainerizationOCI.Process(
-      args: [process.executable] + process.arguments,
+      args: arguments,
       cwd: process.workingDirectory,
       env: process.environment,
       capabilities: caps.toOCI(),
