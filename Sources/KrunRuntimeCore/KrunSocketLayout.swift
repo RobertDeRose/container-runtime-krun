@@ -10,6 +10,7 @@ public struct KrunSocketLayout: Sendable {
   public let directory: URL
   public let controlPath: String
   public let ioEntries: [IOEntry]
+  public let copyEntries: [IOEntry]
 
   public init(id: String) {
     let safeID = String(id.prefix(12)).replacingOccurrences(of: "/", with: "_")
@@ -23,10 +24,17 @@ public struct KrunSocketLayout: Sendable {
         path: directory.appendingPathComponent(String(format: "p%02d", index)).path
       )
     }
+    self.copyEntries = (0..<KrunDefaults.copyPortCount).map { index in
+      IOEntry(
+        port: KrunDefaults.firstCopyPort + UInt32(index),
+        path: directory.appendingPathComponent(String(format: "c%02d", index)).path
+      )
+    }
   }
 
   public var mappings: [KrunVsockMapping] {
     [KrunVsockMapping(port: KrunDefaults.controlPort, path: controlPath, listen: true)]
       + ioEntries.map { KrunVsockMapping(port: $0.port, path: $0.path, listen: false) }
+      + copyEntries.map { KrunVsockMapping(port: $0.port, path: $0.path, listen: false) }
   }
 }

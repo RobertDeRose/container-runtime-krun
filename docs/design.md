@@ -170,7 +170,13 @@ Validate outbound connectivity, DNS, network statistics, repeated cleanup, and p
 
 ### v0.3: host integration
 
-Add host/volume mounts through libkrun virtiofs, copy operations, published Unix sockets, and a solution for arbitrary runtime `dial(port)`. If stable libkrun cannot add host-to-guest mappings after boot, prefer a small generic libkrun API addition over an Apple-specific Containerization change.
+Build host integration in independent slices rather than introducing a second general transport layer.
+
+The first slice is `copyIn` / `copyOut`. Stable libkrun cannot add vsock mappings after VM start, so the runtime predeclares a small guest-to-host copy pool next to the existing stdio pool. Each copy operation leases one mapping, creates its host Unix listener before issuing the vminitd copy RPC, streams the payload, then returns the mapping. Regular files stream as bytes and directories use Containerization's existing tar+gzip archive implementation. Copy uses a separate vminitd control connection and does not reduce the 32-process stdio capacity.
+
+Subsequent mount work must preserve the distinction already present in Apple Container: host directory mounts are virtio-fs shares, while named and anonymous volumes are block-backed filesystems. libkrun provides both virtio-fs and block-device primitives. Host-directory sharing also requires an explicit macOS confinement design before it is enabled; merely passing a directory to libkrun is not treated as a sufficient host security boundary.
+
+Published Unix sockets can use fixed mappings known before boot plus vminitd's existing socket-relay RPCs. Arbitrary runtime `dial(port)` remains the final host-integration slice because it requires a dynamic host-to-guest vsock connection after the VM has already started. If stable libkrun cannot provide that operation, prefer a small generic libkrun API addition over an Apple-specific Containerization protocol.
 
 ### v0.4: parity and benchmarks
 

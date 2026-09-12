@@ -42,6 +42,7 @@ public actor KrunRuntimeService {
   private var vm: KrunVMController?
   private var config: ContainerConfiguration?
   private var portPool: KrunPortPool?
+  private var copyPortPool: KrunPortPool?
   private var processes: [String: ProcessRecord] = [:]
   private var stopWaiters: [CheckedContinuation<Void, Never>] = []
   private var networkSessions: [XPCClientSession] = []
@@ -120,7 +121,8 @@ public actor KrunRuntimeService {
       throw error
     }
 
-    let pool = KrunPortPool(entries: controller.socketLayout.ioEntries)
+    let pool = KrunPortPool(entries: controller.socketLayout.ioEntries, name: "stdio")
+    let copyPool = KrunPortPool(entries: controller.socketLayout.copyEntries, name: "copy")
     let stdio = message.stdioHandles()
 
     // Match Apple's runtime lifecycle boundary: bootstrap owns VM/guest setup only.
@@ -129,6 +131,7 @@ public actor KrunRuntimeService {
     self.vm = controller
     self.config = containerConfig
     self.portPool = pool
+    self.copyPortPool = copyPool
     self.networkSessions = networkResources.sessions
     self.networkAttachments = networkResources.attachments
     self.networkBackends = networkResources.backends
@@ -415,12 +418,58 @@ public actor KrunRuntimeService {
   @Sendable public func dial(_ message: XPCMessage) async throws -> XPCMessage {
     throw unsupported("dial")
   }
-  @Sendable public func copyIn(_ message: XPCMessage) async throws -> XPCMessage {
-    throw unsupported("copyIn")
+
+  @Sendable
+  public func copyIn(_ message: XPCMessage) async throws -> XPCMessage {
+    guard state == .running || state == .booted else {
+      throw ContainerizationError(.invalidState, message: "cannot copyIn: container is not running")
+    }
+    guard let controller = vm, let copyPool = copyPortPool else {
+      throw ContainerizationError(.invalidState, message: "runtime is not booted")
+    }
+    guard let sourcePath = message.string(key: RuntimeKeys.sourcePath.rawValue) else {
+      throw ContainerizationError(.invalidArgument, message: "no source path supplied for copyIn")
+    }
+    guard let destinationPath = message.string(key: RuntimeKeys.destinationPath.rawValue) else {
+      throw ContainerizationError(.invalidArgument, message: "no destination path supplied for copyIn")
+    }
+
+    try await KrunCopyOperations.copyIn(
+      controller: controller,
+      pool: copyPool,
+      source: URL(fileURLWithPath: sourcePath),
+      destination: URL(fileURLWithPath: destinationPath),
+      mode: UInt32(message.uint64(key: RuntimeKeys.fileMode.rawValue)),
+      createParents: message.bool(key: RuntimeKeys.createParents.rawValue)
+    )
+    return message.reply()
   }
-  @Sendable public func copyOut(_ message: XPCMessage) async throws -> XPCMessage {
-    throw unsupported("copyOut")
+
+  @Sendable
+  public func copyOut(_ message: XPCMessage) async throws -> XPCMessage {
+    guard state == .running || state == .booted else {
+      throw ContainerizationError(.invalidState, message: "cannot copyOut: container is not running")
+    }
+    guard let controller = vm, let copyPool = copyPortPool else {
+      throw ContainerizationError(.invalidState, message: "runtime is not booted")
+    }
+    guard let sourcePath = message.string(key: RuntimeKeys.sourcePath.rawValue) else {
+      throw ContainerizationError(.invalidArgument, message: "no source path supplied for copyOut")
+    }
+    guard let destinationPath = message.string(key: RuntimeKeys.destinationPath.rawValue) else {
+      throw ContainerizationError(.invalidArgument, message: "no destination path supplied for copyOut")
+    }
+
+    try await KrunCopyOperations.copyOut(
+      controller: controller,
+      pool: copyPool,
+      source: URL(fileURLWithPath: sourcePath),
+      destination: URL(fileURLWithPath: destinationPath),
+      createParents: message.bool(key: RuntimeKeys.createParents.rawValue)
+    )
+    return message.reply()
   }
+
   @Sendable public func snapshotDisk(_ message: XPCMessage) async throws -> XPCMessage {
     throw unsupported("snapshotDisk")
   }
@@ -492,6 +541,7 @@ public actor KrunRuntimeService {
     // Clear ownership before any await so concurrent stop/wait cleanup is idempotent.
     vm = nil
     portPool = nil
+    copyPortPool = nil
     let containerID = config?.id
     let records = processes
     // Keep completed process records until this runtime instance exits. Apple Container

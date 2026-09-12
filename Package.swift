@@ -35,6 +35,7 @@ let package = Package(
         .product(name: "ContainerRuntimeClient", package: "container"),
         .product(name: "ContainerXPC", package: "container"),
         .product(name: "Containerization", package: "containerization"),
+        .product(name: "ContainerizationArchive", package: "containerization"),
         .product(name: "ContainerizationOCI", package: "containerization"),
         .product(name: "ContainerizationOS", package: "containerization"),
         .product(name: "Logging", package: "swift-log"),

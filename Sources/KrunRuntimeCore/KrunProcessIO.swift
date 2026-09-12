@@ -13,9 +13,11 @@ public actor KrunPortPool {
     public let path: String
   }
 
+  private let name: String
   private var available: [Lease]
 
-  public init(entries: [KrunSocketLayout.IOEntry]) {
+  public init(entries: [KrunSocketLayout.IOEntry], name: String = "I/O") {
+    self.name = name
     self.available = entries.map { Lease(port: $0.port, path: $0.path) }
   }
 
@@ -24,7 +26,7 @@ public actor KrunPortPool {
       throw ContainerizationError(
         .internalError,
         message:
-          "libkrun stdio port pool exhausted (requested \(count), available \(available.count))"
+          "libkrun \(name) port pool exhausted (requested \(count), available \(available.count))"
       )
     }
     let leases = Array(available.prefix(count))

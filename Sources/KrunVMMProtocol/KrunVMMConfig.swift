@@ -72,6 +72,8 @@ public enum KrunDefaults {
   public static let controlPort: UInt32 = 1024
   public static let firstIOPort: UInt32 = 0x1000_0000
   public static let ioPortCount = 96
+  public static let firstCopyPort: UInt32 = firstIOPort + UInt32(ioPortCount)
+  public static let copyPortCount = 8
   public static let memoryOverheadBytes: UInt64 = 128 * 1024 * 1024
 
   public static var libkrunPath: String {
