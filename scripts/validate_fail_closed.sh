@@ -405,7 +405,7 @@ run_feature_gate_case \
 
 run_feature_gate_case \
   host-mount \
-  "host, block, volume, and virtiofs mounts" \
+  "host, block, and virtiofs mounts" \
   --network none \
   --mount "type=bind,source=${HOST_MOUNT_DIR_ABS},target=/mnt/gate8" \
   "$IMAGE" true

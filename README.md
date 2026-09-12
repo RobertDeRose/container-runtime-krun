@@ -6,11 +6,11 @@ The project exists to validate and productize one specific advantage demonstrate
 
 No changes to `apple/container` or `apple/containerization` are required. The plugin uses Apple Container's public `runtime` plugin contract.
 
-## v0.2 scope
+## Current scope
 
-v0.2 keeps the validated v0.1 lifecycle surface and adds the first networking slice:
+v0.2.0 established the lifecycle and networking baseline. Development on v0.3 adds host integration in independent slices:
 
-| Capability | v0.2 |
+| Capability | Current |
 | --- | --- |
 | Boot Apple kernel + vminitd with libkrun | yes |
 | Run initial container process | yes |
@@ -22,10 +22,11 @@ v0.2 keeps the validated v0.1 lifecycle surface and adds the first networking sl
 | automatic free-page reporting | yes, provided by libkrun + Apple kernel |
 | Networking | yes, one Apple `container-network-vmnet` `allocationOnly` attachment |
 | Published TCP/UDP ports | yes, through Apple `SocketForwarder` on the first attachment |
-| Host/volume/virtiofs mounts | no |
+| Apple named/anonymous volumes | yes, libkrun virtio-blk |
+| Host bind/virtiofs mounts | no |
 | Published Unix sockets | no |
 | Arbitrary runtime `dial(port)` | no |
-| `copyIn` / `copyOut` | no |
+| `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
 | Disk snapshot / trim | no |
 | Rosetta | no |
 | Nested virtualization | no |
@@ -126,18 +127,32 @@ container run --rm \
 
 Choose a different private subnet if `192.168.200.0/24` overlaps an existing Apple Container network.
 
+Apple named and anonymous volumes are attached as libkrun virtio-blk devices while Apple Container remains authoritative for volume creation, ownership, and deletion:
+
+```bash
+container volume create app-data
+container run --rm \
+  --runtime container-runtime-krun \
+  --network none \
+  -v app-data:/data \
+  alpine:3.20 sh -c 'echo persisted >/data/value.txt'
+```
+
+Host directory mounts remain unsupported pending a safe macOS confinement boundary for virtio-fs.
+
 Once feature parity is sufficient, a separately installed user plugin named `container-runtime-linux` can shadow Apple's bundled runtime. v0.2 deliberately does not install itself that way.
 
 ## Design constraints
 
 The runtime is one plugin process per Apple Container sandbox. It starts one child `container-krun-vmm-helper` process that owns libkrun and the Hypervisor.framework entitlement.
 
-libkrun's vsock mappings are configured before VM start. v0.2 therefore reserves:
+libkrun's vsock mappings are configured before VM start. The runtime currently reserves:
 
 - guest port `1024` for the host-to-guest vminitd control channel;
-- 96 guest-to-host ports beginning at `0x10000000` for process stdio.
+- 96 guest-to-host ports beginning at `0x10000000` for process stdio;
+- 8 guest-to-host ports immediately after the stdio range for copy transfers.
 
-The pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
+The stdio pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
 
 For the first v0.2 networking slice, Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through an external `vmnet-helper` packet backend. The Apple-assigned address, gateway, DNS, hosts entry, and MTU are configured in the guest with vminitd. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`. Published TCP/UDP ports reuse Apple Container's `SocketForwarder` implementation and target the Apple-assigned address on the first attachment. Multiple attachments remain intentionally unsupported.
 
@@ -147,4 +162,4 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
 
-Development after the v0.2.0 tag starts the v0.3 host-integration milestone with `copyIn` / `copyOut`. Copy data uses a separate predeclared guest-to-host vsock pool so transfers do not consume the 96 stdio mappings. Regular files stream directly; directories use Containerization's existing tar+gzip archive implementation without intermediate files. Run `scripts/validate_copy.sh --install` for the macOS behavioral gate.
+Development after the v0.2.0 tag starts the v0.3 host-integration milestone. `copyIn` / `copyOut` are validated, and named/anonymous Apple volumes are the next slice. Volume images remain owned by Apple Container and are attached as raw virtio-blk devices; the runtime adds no volume registry or persistent state. Run `scripts/validate_copy.sh --install` and `scripts/validate_volumes.sh --install` for the macOS behavioral gates.

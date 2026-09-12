@@ -125,7 +125,7 @@ The runtime uses Apple Container's public `SocketForwarder` implementation and t
 Verify each remaining unsupported feature produces an explicit error before VM startup where possible:
 
 - request more than one network attachment;
-- add a host/volume mount;
+- add a host bind/virtio-fs mount;
 - publish a Unix socket;
 - request Rosetta;
 - request nested virtualization;
@@ -145,3 +145,13 @@ scripts/validate_copy.sh --install
 The validator runs the krun runtime with networking disabled and exercises regular-file and directory copies in both directions through the real Apple Container `container copy` command. It also verifies existing-directory and trailing-slash destination behavior, repeated binary round trips, several concurrent transfers, recovery after a missing-source failure, continued container usability, and final VMM/socket cleanup.
 
 Copy traffic must use the dedicated predeclared transfer pool and must not consume the v0.1 stdio capacity. Results are packaged as `validation-results/container-runtime-krun-copy-*.tar.gz`.
+
+## Gate 10: v0.3 Apple volumes
+
+Validate block-backed named and anonymous volumes with:
+
+```bash
+scripts/validate_volumes.sh --install
+```
+
+The validator uses Apple Container's own volume service and `-v` parsing. It verifies named-volume persistence across VM recreation, read-only exposure, multiple independent volumes, repeated destinations for one backing volume, anonymous volume allocation, copy/statistics compatibility, Apple-owned volume deletion, and final VMM/socket cleanup. The runtime must not create a second volume registry or persistent metadata store.

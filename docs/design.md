@@ -53,20 +53,21 @@ This split is deliberate:
 On `bootstrap`:
 
 1. Materialize the normal Apple runtime bundle from `runtime-configuration.json` if needed.
-2. Reject unsupported v0.2 configuration before starting a VM.
+2. Reject unsupported configuration before starting a VM.
 3. If a network is requested, allocate it through Apple's network plugin and attach libkrun to the resulting vmnet network.
 4. Create a short private directory under `/tmp` for Unix sockets.
-5. Predeclare the vminitd, stdio, and virtio-net mappings in the helper configuration.
+5. Predeclare the vminitd/stdin/stdout/copy mappings, network devices, and resolved Apple volume disks in the helper configuration.
 6. Start `container-krun-vmm-helper`.
 7. Connect to guest port 1024 through libkrun's Unix proxy.
 8. Require a successful read-only vminitd RPC before considering the guest ready.
 9. Run `Vminitd.standardSetup()` and the stock runtime sysctls.
 10. Mount `/dev/vdb` at `/run/container/<id>/rootfs`.
-11. Configure `eth0`, routes, DNS, and `/etc/hosts` from the Apple network allocation.
-12. Record the init-process configuration and XPC-provided stdio handles without creating the guest process.
-13. Transition the runtime to `booted` and return from `bootstrap`.
+11. Mount any volume disks beginning at `/dev/vdc` under `/run/container/<id>/volumes/<n>`.
+12. Configure `eth0`, routes, DNS, and `/etc/hosts` from the Apple network allocation.
+13. Record the init-process configuration and XPC-provided stdio handles without creating the guest process.
+14. Transition the runtime to `booted` and return from `bootstrap`.
 
-The helper attaches the initfs as `/dev/vda` and rootfs as `/dev/vdb`. The kernel command line retains Apple's vminitd contract:
+The helper attaches the initfs as `/dev/vda`, rootfs as `/dev/vdb`, and unique Apple volumes from `/dev/vdc` onward. The kernel command line retains Apple's vminitd contract:
 
 ```text
 console=hvc0 ... init=/sbin/vminitd ro rootfstype=ext4 root=/dev/vda
@@ -139,14 +140,15 @@ Teardown follows the ordering established by the feasibility experiment:
 2. wait for the configured grace period;
 3. use SIGKILL if necessary;
 4. drain/cancel stdio relays;
-5. unmount the rootfs;
-6. sync the guest;
-7. delete the vminitd container process;
-8. close all published-port forwarders;
-9. close the vminitd channel;
-10. terminate the VMM helper;
-11. stop the vmnet packet backend and close the Apple network session;
-12. remove the private Unix-socket directory.
+5. unmount any block-backed volume staging mounts;
+6. unmount the rootfs;
+7. sync the guest;
+8. delete the vminitd container process;
+9. close all published-port forwarders;
+10. close the vminitd channel;
+11. terminate the VMM helper;
+12. stop the vmnet packet backend and close the Apple network session;
+13. remove the private Unix-socket directory.
 
 The VM ownership is cleared before asynchronous cleanup begins so a concurrent API-server `wait` and user `stop` cannot perform teardown twice.
 
@@ -158,7 +160,7 @@ The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO
 
 ## v0.2 unsupported surface
 
-Multiple network attachments, host mounts, published Unix sockets, arbitrary `dial`, copy, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors.
+Multiple network attachments, host directory/virtio-fs mounts, published Unix sockets, arbitrary `dial`, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors. `copyIn` / `copyOut` and Apple block-backed volumes are enabled by v0.3 slices.
 
 This is intentional. v0.2 keeps the working packet path and published TCP/UDP forwarding narrow while deferring unrelated host-integration and multi-network work.
 
@@ -174,7 +176,9 @@ Build host integration in independent slices rather than introducing a second ge
 
 The first slice is `copyIn` / `copyOut`. Stable libkrun cannot add vsock mappings after VM start, so the runtime predeclares a small guest-to-host copy pool next to the existing stdio pool. Each copy operation leases one mapping, creates its host Unix listener before issuing the vminitd copy RPC, streams the payload, then returns the mapping. Regular files stream as bytes and directories use Containerization's existing tar+gzip archive implementation. Copy uses a separate vminitd control connection and does not reduce the 32-process stdio capacity.
 
-Subsequent mount work must preserve the distinction already present in Apple Container: host directory mounts are virtio-fs shares, while named and anonymous volumes are block-backed filesystems. libkrun provides both virtio-fs and block-device primitives. Host-directory sharing also requires an explicit macOS confinement design before it is enabled; merely passing a directory to libkrun is not treated as a sufficient host security boundary.
+The volume slice preserves the distinction already present in Apple Container: named and anonymous volumes are block-backed filesystems. Apple resolves and owns the volume image; the runtime attaches each unique ext4 volume as a raw libkrun virtio-blk disk, mounts it at `/run/container/<id>/volumes/<n>`, and supplies OCI bind mounts from that staging path to the requested destinations. Repeated destinations for one Apple volume reuse one attached disk. Read-only destinations remain per-mount; the underlying disk is read-only only when every use is read-only. Apple remains authoritative for volume creation, in-use tracking, persistence, and deletion.
+
+Host directory mounts are a separate future slice using virtio-fs. They require an explicit macOS confinement design before they are enabled; merely passing a directory to libkrun is not treated as a sufficient host security boundary.
 
 Published Unix sockets can use fixed mappings known before boot plus vminitd's existing socket-relay RPCs. Arbitrary runtime `dial(port)` remains the final host-integration slice because it requires a dynamic host-to-guest vsock connection after the VM has already started. If stable libkrun cannot provide that operation, prefer a small generic libkrun API addition over an Apple-specific Containerization protocol.
 
