@@ -132,4 +132,16 @@ Verify each remaining unsupported feature produces an explicit error before VM s
 - request SSH forwarding;
 - request `--init`.
 
-Runtime-only unsupported routes (`dial`, copy, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding.
+Runtime-only unsupported routes (`dial`, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding. Copy moves out of this gate once the v0.3 copy slice is enabled and is covered by Gate 9 instead.
+
+## Gate 9: v0.3 copy operations
+
+Validate the first v0.3 host-integration slice with:
+
+```bash
+scripts/validate_copy.sh --install
+```
+
+The validator runs the krun runtime with networking disabled and exercises regular-file and directory copies in both directions through the real Apple Container `container copy` command. It also verifies existing-directory and trailing-slash destination behavior, repeated binary round trips, several concurrent transfers, recovery after a missing-source failure, continued container usability, and final VMM/socket cleanup.
+
+Copy traffic must use the dedicated predeclared transfer pool and must not consume the v0.1 stdio capacity. Results are packaged as `validation-results/container-runtime-krun-copy-*.tar.gz`.

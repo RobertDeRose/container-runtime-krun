@@ -94,7 +94,6 @@ ARCHIVE="$RESULT_ROOT/container-runtime-krun-gate8-${STAMP}-$$.tar.gz"
 ROUTE_ID="$PREFIX-routes"
 INITIAL_SOCKETS="$RESULT_DIR/initial-sockets.txt"
 HOST_MOUNT_DIR="$RESULT_DIR/host-mount"
-HOST_COPY_FILE="$RESULT_DIR/copy-in-source.txt"
 mkdir -p "$RESULT_DIR" "$HOST_MOUNT_DIR"
 
 FAILURES=0
@@ -482,17 +481,6 @@ fi
 container inspect "$ROUTE_ID" >"$RESULT_DIR/route-container-inspect.txt" 2>&1 || true
 capture_runtime_state "$RESULT_DIR/runtime-state-routes-live.txt"
 
-printf 'gate8-copy-in\n' >"$HOST_COPY_FILE"
-expect_unsupported \
-  route-copy-in \
-  "container-runtime-krun v0.2 does not support runtime route copyIn" \
-  container copy "$HOST_COPY_FILE" "$ROUTE_ID:/tmp/gate8-copy-in.txt"
-
-expect_unsupported \
-  route-copy-out \
-  "container-runtime-krun v0.2 does not support runtime route copyOut" \
-  container copy "$ROUTE_ID:/etc/hostname" "$RESULT_DIR/copy-out.txt"
-
 expect_unsupported \
   route-snapshot \
   "container-runtime-krun v0.2 does not support runtime route snapshotDisk" \
@@ -581,7 +569,7 @@ grep -E "$PREFIX|container-runtime-krun v0\.2 does not support" \
   echo "network=$NETWORK"
   echo "image=$IMAGE"
   echo "feature_gate_cases=${#CONFIG_IDS[@]}"
-  echo "runtime_route_cases=5"
+  echo "runtime_route_cases=3"
   echo "passes=$PASSES"
   echo "skips=$SKIPS"
   echo "failures=$FAILURES"
