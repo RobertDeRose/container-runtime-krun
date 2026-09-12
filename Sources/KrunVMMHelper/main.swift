@@ -19,6 +19,10 @@ private final class KrunLibrary {
   typealias ToggleImplicitDevice = @convention(c) (UInt32) -> Int32
   typealias AddDisk =
     @convention(c) (UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?, Bool) -> Int32
+  typealias AddDisk3 =
+    @convention(c) (
+      UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt32, Bool, Bool, UInt32
+    ) -> Int32
   typealias AddVsock = @convention(c) (UInt32, UInt32) -> Int32
   typealias AddVsockPort = @convention(c) (UInt32, UInt32, UnsafePointer<CChar>?, Bool) -> Int32
   typealias AddNetUnixgram =
@@ -48,6 +52,7 @@ private final class KrunLibrary {
   let setVMConfig: SetVMConfig
   let disableImplicitVsock: ToggleImplicitDevice
   let addDisk: AddDisk
+  let addDisk3: AddDisk3?
   let addVsock: AddVsock
   let addVsockPort: AddVsockPort
   let addNetUnixgram: AddNetUnixgram
@@ -69,6 +74,7 @@ private final class KrunLibrary {
     self.disableImplicitVsock = try Self.load(
       handle, "krun_disable_implicit_vsock", as: ToggleImplicitDevice.self)
     self.addDisk = try Self.load(handle, "krun_add_disk", as: AddDisk.self)
+    self.addDisk3 = Self.loadOptional(handle, "krun_add_disk3", as: AddDisk3.self)
     self.addVsock = try Self.load(handle, "krun_add_vsock", as: AddVsock.self)
     self.addVsockPort = try Self.load(handle, "krun_add_vsock_port2", as: AddVsockPort.self)
     self.addNetUnixgram = try Self.load(
@@ -82,6 +88,13 @@ private final class KrunLibrary {
 
   deinit {
     dlclose(handle)
+  }
+
+  private static func loadOptional<T>(
+    _ handle: UnsafeMutableRawPointer, _ symbol: String, as: T.Type
+  ) -> T? {
+    guard let pointer = dlsym(handle, symbol) else { return nil }
+    return unsafeBitCast(pointer, to: T.self)
   }
 
   private static func load<T>(_ handle: UnsafeMutableRawPointer, _ symbol: String, as: T.Type)
@@ -163,6 +176,30 @@ private func run(config: KrunVMMConfig) throws -> Never {
   try withCString("root") { id in
     try withCString(config.rootDisk) { disk in
       try checked(krun.addDisk(context, id, disk, false), "krun_add_disk(root)")
+    }
+  }
+
+  if !config.disks.isEmpty {
+    guard let addDisk3 = krun.addDisk3 else {
+      throw KrunError(description: "libkrun does not export krun_add_disk3 required for volumes")
+    }
+    for disk in config.disks {
+      try withCString(disk.blockID) { id in
+        try withCString(disk.path) { path in
+          try checked(
+            addDisk3(
+              context,
+              id,
+              path,
+              0, // KRUN_DISK_FORMAT_RAW
+              disk.readOnly,
+              disk.directIO,
+              disk.syncMode.rawValue
+            ),
+            "krun_add_disk3(\(disk.blockID))"
+          )
+        }
+      }
     }
   }
 

@@ -28,8 +28,17 @@ public enum KrunFeatureGate {
     if config.useInit {
       throw unsupported("--init")
     }
-    for mount in config.mounts where !mount.isTmpfs {
-      throw unsupported("host, block, volume, and virtiofs mounts")
+    for mount in config.mounts {
+      switch mount.type {
+      case .tmpfs:
+        break
+      case .volume(_, let format, _, _):
+        if format != "ext4" {
+          throw unsupported("non-ext4 volume mounts")
+        }
+      case .block, .virtiofs:
+        throw unsupported("host, block, and virtiofs mounts")
+      }
     }
   }
 

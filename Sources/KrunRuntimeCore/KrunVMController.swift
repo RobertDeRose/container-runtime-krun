@@ -20,6 +20,7 @@ public final class KrunVMController: @unchecked Sendable {
   public let rootPath: String
   public let socketLayout: KrunSocketLayout
   public let agent: Vminitd
+  let volumeAttachments: [KrunVolumeAttachment]
 
   private let helper: Foundation.Process
   let eventLoopGroup: MultiThreadedEventLoopGroup
@@ -33,6 +34,7 @@ public final class KrunVMController: @unchecked Sendable {
     rootPath: String,
     socketLayout: KrunSocketLayout,
     agent: Vminitd,
+    volumeAttachments: [KrunVolumeAttachment],
     helper: Foundation.Process,
     group: MultiThreadedEventLoopGroup,
     log: Logger,
@@ -44,6 +46,7 @@ public final class KrunVMController: @unchecked Sendable {
     self.rootPath = rootPath
     self.socketLayout = socketLayout
     self.agent = agent
+    self.volumeAttachments = volumeAttachments
     self.helper = helper
     self.eventLoopGroup = group
     self.log = log
@@ -76,6 +79,7 @@ public final class KrunVMController: @unchecked Sendable {
       let rootfs = try bundle.containerRootfs
       try requireExt4Block(initfs, name: "initial filesystem")
       try requireExt4Block(rootfs, name: "container root filesystem")
+      let volumeAttachments = try KrunVolumeLayout.attachments(for: config)
 
       guard FileManager.default.isReadableFile(atPath: helperPath) else {
         throw ContainerizationError(
@@ -112,7 +116,8 @@ public final class KrunVMController: @unchecked Sendable {
         cpus: UInt8(cpus),
         memoryMiB: UInt32(memoryMiB64),
         vsockMappings: layout.mappings,
-        networks: networkConfigs
+        networks: networkConfigs,
+        disks: volumeAttachments.map(\.diskConfig)
       )
       let helperConfigPath = bundle.filePath(for: "krun-vmm.json")
       try JSONEncoder().encode(helperConfig).write(to: helperConfigPath)
@@ -139,9 +144,9 @@ public final class KrunVMController: @unchecked Sendable {
       )
 
       let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-      let agent: Vminitd
+      var cleanupAgent: Vminitd?
       do {
-        agent = try await connectAgent(
+        let agent = try await connectAgent(
           socketPath: layout.controlPath,
           helper: helper,
           helperLogPath: helperLogPath,
@@ -149,6 +154,7 @@ public final class KrunVMController: @unchecked Sendable {
           log: log,
           lifecycleStartedAt: lifecycleStartedAt
         )
+        cleanupAgent = agent
         KrunLifecycleTrace.mark(
           log,
           startedAt: lifecycleStartedAt,
@@ -183,6 +189,23 @@ public final class KrunVMController: @unchecked Sendable {
           startedAt: lifecycleStartedAt,
           event: "rootfs mount complete"
         )
+        for (index, volume) in volumeAttachments.enumerated() {
+          try await agent.mkdir(path: volume.stagingPath, all: true, perms: 0o755)
+          try await agent.mount(
+            ContainerizationOCI.Mount(
+              type: "ext4",
+              source: volume.devicePath,
+              destination: volume.stagingPath,
+              options: volume.readOnly ? ["ro"] : []
+            )
+          )
+          KrunLifecycleTrace.mark(
+            log,
+            startedAt: lifecycleStartedAt,
+            event: "volume mount complete",
+            metadata: ["volume_index": "\(index)"]
+          )
+        }
         if !networkAttachments.isEmpty {
           KrunLifecycleTrace.mark(
             log,
@@ -212,12 +235,24 @@ public final class KrunVMController: @unchecked Sendable {
           rootPath: rootPath,
           socketLayout: layout,
           agent: agent,
+          volumeAttachments: volumeAttachments,
           helper: helper,
           group: group,
           log: log,
           helperLogHandle: helperLog
         )
       } catch {
+        if let cleanupAgent {
+          for volume in volumeAttachments.reversed() {
+            try? await cleanupAgent.umount(path: volume.stagingPath, flags: 0)
+          }
+          try? await cleanupAgent.umount(
+            path: KrunSpecBuilder.guestRootPath(containerID: config.id),
+            flags: 0
+          )
+          try? await cleanupAgent.sync()
+          try? await cleanupAgent.close()
+        }
         terminate(helper)
         try? helperLog.close()
         try? await group.shutdownGracefully()
@@ -227,9 +262,16 @@ public final class KrunVMController: @unchecked Sendable {
     #endif
   }
 
-  public func shutdownGuest() async {
+  func unmountFilesystems() async {
+    for volume in volumeAttachments.reversed() {
+      try? await agent.umount(path: volume.stagingPath, flags: 0)
+    }
     try? await agent.umount(path: rootPath, flags: 0)
     try? await agent.sync()
+  }
+
+  public func shutdownGuest() async {
+    await unmountFilesystems()
     await shutdownVMM()
   }
 

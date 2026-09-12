@@ -115,7 +115,7 @@ public actor KrunRuntimeService {
         eventLoopGroup: controller.eventLoopGroup
       )
     } catch {
-      await controller.shutdownVMM()
+      await controller.shutdownGuest()
       for backend in networkResources.backends { backend.stop() }
       for session in networkResources.sessions { session.close() }
       throw error
@@ -203,7 +203,8 @@ public actor KrunRuntimeService {
       let spec = try KrunSpecBuilder.make(
         container: containerConfig,
         process: record.configuration,
-        rootPath: controller.rootPath
+        rootPath: controller.rootPath,
+        volumeAttachments: controller.volumeAttachments
       )
       try await processAgent.createProcess(
         id: id,
@@ -561,8 +562,7 @@ public actor KrunRuntimeService {
       try? await record.agent?.close()
     }
     if let containerID {
-      try? await controller.agent.umount(path: controller.rootPath, flags: 0)
-      try? await controller.agent.sync()
+      await controller.unmountFilesystems()
       try? await controller.agent.deleteProcess(id: containerID, containerID: containerID)
     }
     await stopSocketForwarders()

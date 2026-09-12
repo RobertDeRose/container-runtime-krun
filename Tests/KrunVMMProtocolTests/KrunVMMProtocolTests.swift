@@ -22,6 +22,13 @@ import Testing
         socketPath: "/tmp/net0.sock",
         macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
       )
+    ],
+    disks: [
+      .init(
+        blockID: "volume0",
+        path: "/tmp/volume.ext4",
+        readOnly: false
+      )
     ]
   )
   let data = try JSONEncoder().encode(original)

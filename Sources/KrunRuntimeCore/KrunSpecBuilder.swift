@@ -10,6 +10,20 @@ public enum KrunSpecBuilder {
     process: ProcessConfiguration,
     rootPath: String
   ) throws -> Spec {
+    try make(
+      container: container,
+      process: process,
+      rootPath: rootPath,
+      volumeAttachments: []
+    )
+  }
+
+  static func make(
+    container: ContainerConfiguration,
+    process: ProcessConfiguration,
+    rootPath: String,
+    volumeAttachments: [KrunVolumeAttachment]
+  ) throws -> Spec {
     let safe = ["nosuid", "noexec", "nodev"]
     var mounts: [ContainerizationOCI.Mount] = [
       .init(type: "proc", source: "proc", destination: "/proc"),
@@ -31,15 +45,10 @@ public enum KrunSpecBuilder {
       ),
       .init(type: "cgroup2", source: "none", destination: "/sys/fs/cgroup", options: safe),
     ]
-    mounts.append(
-      contentsOf: container.mounts.map { mount in
-        ContainerizationOCI.Mount(
-          type: "tmpfs",
-          source: "tmpfs",
-          destination: mount.destination,
-          options: mount.options
-        )
-      })
+    mounts.append(contentsOf: try KrunVolumeLayout.ociMounts(
+      for: container,
+      attachments: volumeAttachments
+    ))
 
     let caps = try effectiveCapabilities(capAdd: container.capAdd, capDrop: container.capDrop)
     let user: ContainerizationOCI.User

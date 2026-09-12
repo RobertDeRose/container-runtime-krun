@@ -1,5 +1,33 @@
 import Foundation
 
+public enum KrunDiskSyncMode: UInt32, Codable, Sendable, Equatable {
+  case none = 0
+  case relaxed = 1
+  case full = 2
+}
+
+public struct KrunDiskConfig: Codable, Sendable, Equatable {
+  public let blockID: String
+  public let path: String
+  public let readOnly: Bool
+  public let directIO: Bool
+  public let syncMode: KrunDiskSyncMode
+
+  public init(
+    blockID: String,
+    path: String,
+    readOnly: Bool,
+    directIO: Bool = false,
+    syncMode: KrunDiskSyncMode = .relaxed
+  ) {
+    self.blockID = blockID
+    self.path = path
+    self.readOnly = readOnly
+    self.directIO = directIO
+    self.syncMode = syncMode
+  }
+}
+
 public struct KrunVsockMapping: Codable, Sendable, Equatable {
   public let port: UInt32
   public let path: String
@@ -42,6 +70,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
   public let memoryMiB: UInt32
   public let vsockMappings: [KrunVsockMapping]
   public let networks: [KrunNetworkConfig]
+  public let disks: [KrunDiskConfig]
 
   public init(
     libkrun: String,
@@ -53,7 +82,8 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     cpus: UInt8,
     memoryMiB: UInt32,
     vsockMappings: [KrunVsockMapping],
-    networks: [KrunNetworkConfig] = []
+    networks: [KrunNetworkConfig] = [],
+    disks: [KrunDiskConfig] = []
   ) {
     self.libkrun = libkrun
     self.kernel = kernel
@@ -65,6 +95,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     self.memoryMiB = memoryMiB
     self.vsockMappings = vsockMappings
     self.networks = networks
+    self.disks = disks
   }
 }
 
@@ -75,6 +106,7 @@ public enum KrunDefaults {
   public static let firstCopyPort: UInt32 = firstIOPort + UInt32(ioPortCount)
   public static let copyPortCount = 8
   public static let memoryOverheadBytes: UInt64 = 128 * 1024 * 1024
+  public static let maxVolumeCount = 24
 
   public static var libkrunPath: String {
     if let configured = ProcessInfo.processInfo.environment["LIBKRUN_DYLIB"], !configured.isEmpty {
