@@ -391,7 +391,6 @@ else
 fi
 
 HOST_MOUNT_DIR_ABS="$(absolute_path "$HOST_MOUNT_DIR")"
-PUBLISHED_SOCKET_HOST="$(absolute_path "$RESULT_DIR/published.sock")"
 NO_NETWORK_PORT="$(free_tcp_port)"
 
 # Configuration-time feature gates. Every command must fail with the runtime's
@@ -411,13 +410,6 @@ run_feature_gate_case \
   "$IMAGE" true
 
 run_feature_gate_case \
-  published-unix-socket \
-  "published Unix sockets" \
-  --network none \
-  --publish-socket "${PUBLISHED_SOCKET_HOST}:/tmp/gate8.sock" \
-  "$IMAGE" true
-
-run_feature_gate_case \
   rosetta \
   "Rosetta; use Apple's official runtime for x86_64 emulation" \
   --network none \
@@ -429,13 +421,6 @@ run_feature_gate_case \
   "nested virtualization" \
   --network none \
   --virtualization \
-  "$IMAGE" true
-
-run_feature_gate_case \
-  ssh-forwarding \
-  "SSH agent forwarding" \
-  --network none \
-  --ssh \
   "$IMAGE" true
 
 # This boundary is implemented by the same feature gate even though the Gate 8

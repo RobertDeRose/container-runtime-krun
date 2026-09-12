@@ -126,12 +126,10 @@ Verify each remaining unsupported feature produces an explicit error before VM s
 
 - request more than one network attachment;
 - add a host bind/virtio-fs mount;
-- publish a Unix socket;
 - request Rosetta;
-- request nested virtualization;
-- request SSH forwarding.
+- request nested virtualization.
 
-Runtime-only unsupported routes (`dial`, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy and `--init` are covered by their dedicated gates instead.
+Runtime-only unsupported routes (`dial`, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, and SSH forwarding are covered by dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 
@@ -164,3 +162,15 @@ scripts/validate_init.sh --install
 ```
 
 The validator proves that the requested workload is no longer PID 1, preserves workload exit status, forwards stdin/stdout and terminal I/O, leaves `container exec` usable, reaps an orphaned grandchild without leaving a PID-1 zombie, forwards `SIGTERM` to the workload while preserving its trapped exit status, and leaves no VMM helper or private socket-directory leak after cleanup.
+
+## Gate 12: v0.4 Unix sockets and SSH agent forwarding
+
+Validate the two directions of fixed-vsock Unix socket relaying with:
+
+```bash
+scripts/validate_unix_sockets.sh --install
+```
+
+The validator publishes a workload-owned Unix socket to the host, exercises repeated and concurrent host clients, and verifies that the host listener is removed during normal cleanup. It repeats publication for a socket stored on an Apple block-backed volume so container-path resolution is checked against mount shadowing.
+
+SSH forwarding is validated with a host-side fake agent socket: both the initial process and `container exec` must receive `SSH_AUTH_SOCK=/var/host-services/ssh-auth.sock`, relay bidirectional bytes to the host socket, and preserve the source socket permissions on the guest staging socket. A run with no host `SSH_AUTH_SOCK` verifies Apple's permissive behavior: the guest environment variable remains present, but no socket is mounted. Finally, an intentionally invalid sysctl forces bootstrap rollback after libkrun starts and proves that the owned published host socket and helper process are cleaned up.

@@ -24,13 +24,13 @@ v0.3.0 establishes the lifecycle, networking, copy, and block-backed volume base
 | Published TCP/UDP ports | yes, through Apple `SocketForwarder` on the first attachment |
 | Apple named/anonymous volumes | yes, libkrun virtio-blk |
 | Host bind/virtiofs mounts | no |
-| Published Unix sockets | no |
+| Published Unix sockets | yes, fixed libkrun vsock mappings + vminitd relay |
 | Arbitrary runtime `dial(port)` | no |
 | `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
 | Disk snapshot / trim | no |
 | Rosetta | no, intentionally deferred; use Apple's official runtime for x86_64 emulation |
 | Nested virtualization | no |
-| SSH agent forwarding | no |
+| SSH agent forwarding | yes, reverse fixed-vsock relay from host `SSH_AUTH_SOCK` |
 | `--init` | yes, guest vminitd mounted as the minimal container init |
 
 Remaining unsupported features fail with `ContainerizationError(.unsupported)` rather than silently degrading. Rosetta is intentionally deferred; users requiring x86_64 emulation should use Apple's official runtime.
@@ -135,6 +135,26 @@ container run --rm \
   nginx:alpine
 ```
 
+Unix sockets can be published without a network attachment:
+
+```bash
+container run --rm \
+  --runtime container-runtime-krun \
+  --network none \
+  --publish-socket /tmp/service.sock:/run/service.sock \
+  your-image
+```
+
+SSH agent forwarding uses the launching process's `SSH_AUTH_SOCK`, matching Apple's runtime behavior:
+
+```bash
+container run --rm \
+  --runtime container-runtime-krun \
+  --network none \
+  --ssh \
+  your-image ssh-add -l
+```
+
 Choose a different private subnet if `192.168.200.0/24` overlaps an existing Apple Container network.
 
 Apple named and anonymous volumes are attached as libkrun virtio-blk devices while Apple Container remains authoritative for volume creation, ownership, and deletion:
@@ -160,7 +180,8 @@ libkrun's vsock mappings are configured before VM start. The runtime currently r
 
 - guest port `1024` for the host-to-guest vminitd control channel;
 - 96 guest-to-host ports beginning at `0x10000000` for process stdio;
-- 8 guest-to-host ports immediately after the stdio range for copy transfers.
+- 8 guest-to-host ports immediately after the stdio range for copy transfers;
+- one fixed mapping per configured published Unix socket or active SSH-agent relay, beginning after the copy range.
 
 The stdio pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
 
@@ -172,4 +193,4 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
 
-Development after the v0.2.0 tag starts the v0.3 host-integration milestone. `copyIn` / `copyOut` are validated, and named/anonymous Apple volumes are the next slice. Volume images remain owned by Apple Container and are attached as raw virtio-blk devices; the runtime adds no volume registry or persistent state. Run `scripts/validate_copy.sh --install` and `scripts/validate_volumes.sh --install` for the macOS behavioral gates.
+v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4 parity development has validated `--init`; the current slice adds published Unix sockets and SSH agent forwarding over fixed pre-boot libkrun vsock mappings and vminitd's existing relay RPCs. Run `scripts/validate_init.sh --install` and `scripts/validate_unix_sockets.sh --install` for the corresponding macOS behavioral gates.

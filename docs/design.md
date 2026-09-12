@@ -140,15 +140,16 @@ Teardown follows the ordering established by the feasibility experiment:
 2. wait for the configured grace period;
 3. use SIGKILL if necessary;
 4. drain/cancel stdio relays;
-5. unmount any block-backed volume staging mounts;
-6. unmount the rootfs;
-7. sync the guest;
-8. delete the vminitd container process;
-9. close all published-port forwarders;
-10. close the vminitd channel;
-11. terminate the VMM helper;
-12. stop the vmnet packet backend and close the Apple network session;
-13. remove the private Unix-socket directory.
+5. stop vminitd Unix-socket relays;
+6. unmount any block-backed volume staging mounts;
+7. unmount the rootfs;
+8. sync the guest;
+9. delete the vminitd container process;
+10. close all published-port forwarders;
+11. close the vminitd channel;
+12. terminate the VMM helper and remove owned published Unix-socket paths;
+13. stop the vmnet packet backend and close the Apple network session;
+14. remove the private Unix-socket directory.
 
 The VM ownership is cleared before asynchronous cleanup begins so a concurrent API-server `wait` and user `stop` cannot perform teardown twice.
 
@@ -160,7 +161,7 @@ The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO
 
 ## Current deferred surface
 
-Multiple network attachments, host directory/virtio-fs mounts, published Unix sockets, arbitrary `dial`, snapshots, trim, Rosetta, nested virtualization, and SSH forwarding remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. `--init` is enabled by the first v0.4 parity slice.
+Multiple network attachments, host directory/virtio-fs mounts, arbitrary `dial`, snapshots, trim, Rosetta, and nested virtualization remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. v0.4 enables `--init`, published Unix sockets, and SSH agent forwarding in independent parity slices.
 
 Rosetta is intentionally not part of the active parity roadmap. Its integration is specific to Apple's Virtualization.framework-backed runtime, and users requiring x86_64 emulation should use Apple's official runtime.
 
@@ -180,12 +181,14 @@ The volume slice preserves the distinction already present in Apple Container: n
 
 Host directory mounts are a separate future slice using virtio-fs. They require an explicit macOS confinement design before they are enabled; merely passing a directory to libkrun is not treated as a sufficient host security boundary.
 
-Published Unix sockets can use fixed mappings known before boot plus vminitd's existing socket-relay RPCs. Arbitrary runtime `dial(port)` remains the final host-integration slice because it requires a dynamic host-to-guest vsock connection after the VM has already started. If stable libkrun cannot provide that operation, prefer a small generic libkrun API addition over an Apple-specific Containerization protocol.
+Published Unix sockets use one fixed host-listening libkrun mapping per configured socket plus vminitd's existing `.outOf` relay. SSH forwarding uses the same mechanism in reverse: vminitd creates a short guest staging socket, libkrun maps guest vsock connections to the host `SSH_AUTH_SOCK`, and the staging socket is bind-mounted at `/var/host-services/ssh-auth.sock` in the container. Apple remains authoritative for both configuration surfaces; the runtime adds no relay registry or persistent state. Arbitrary runtime `dial(port)` remains the final host-integration slice because it requires a dynamic host-to-guest vsock connection after the VM has already started. If stable libkrun cannot provide that operation, prefer a small generic libkrun API addition over an Apple-specific Containerization protocol.
 
 ### v0.4: parity and benchmarks
 
 Add selected parity features in independent slices: `--init`, published Unix sockets and SSH forwarding, running-container snapshot/export, and nested virtualization where libkrun and the host support it. Publish repeatable comparisons against `container-runtime-linux`: boot latency, idle RSS, memory returned after workload release, pressure behavior, CPU overhead, and compatibility coverage.
 
 The `--init` slice mirrors Apple Containerization's existing behavior without introducing another init implementation: the guest `/sbin/vminitd` binary is bind-mounted read-only at `/.cz-init`, and only the container's initial OCI process is rewritten to `/.cz-init -- <workload>`. `container exec` processes remain direct exec processes.
+
+The Unix-socket slice predeclares relay mappings before VM start because stable libkrun cannot add them dynamically. Published sockets are resolved through the same container-to-guest path mapping used by copy operations, including volume-backed paths. SSH forwarding preserves Apple's guest path and environment behavior while staging the guest listener at a short VM-global path to stay within Unix socket path limits. Published host paths are owned by the runtime and removed after helper termination and bootstrap rollback.
 
 Rosetta is deliberately excluded from v0.4 and from the active roadmap. If x86_64 emulation is required, use Apple's official runtime.
