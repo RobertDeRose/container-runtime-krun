@@ -30,7 +30,7 @@ enum KrunCopyOperations {
 
     let agent = try await controller.dialAgent()
     do {
-      let resolvedDestination = try resolveContainerPath(
+      let resolvedDestination = KrunContainerPath.resolve(
         controller: controller,
         path: destination
       )
@@ -89,7 +89,7 @@ enum KrunCopyOperations {
       )
     }
 
-    let guestPath = try resolveContainerPath(controller: controller, path: source).url
+    let guestPath = KrunContainerPath.resolve(controller: controller, path: source).url
     let agent = try await controller.dialAgent()
     let channel: KrunCopyChannel
     do {
@@ -150,86 +150,6 @@ enum KrunCopyOperations {
       }
     }
     await channel.close()
-  }
-
-  private struct ResolvedContainerPath {
-    let url: URL
-    let readOnly: Bool
-  }
-
-  /// Translate a path from the container mount namespace to the corresponding
-  /// guest-global path that vminitd can access. Volume mounts are staged outside
-  /// the container rootfs and bind-mounted into the OCI namespace, so copy RPCs
-  /// must address the staging mount rather than the shadowed rootfs path.
-  private static func resolveContainerPath(
-    controller: KrunVMController,
-    path: URL
-  ) throws -> ResolvedContainerPath {
-    let containerPath = normalizedAbsolutePath(path.path)
-    let attachments = Dictionary(
-      uniqueKeysWithValues: controller.volumeAttachments.map { ($0.name, $0) }
-    )
-
-    var matchedDestination: String?
-    var matchedAttachment: KrunVolumeAttachment?
-    var matchedReadOnly = false
-
-    for filesystem in controller.config.mounts {
-      guard case .volume(let name, _, _, _) = filesystem.type,
-        let attachment = attachments[name]
-      else {
-        continue
-      }
-
-      let destination = normalizedAbsolutePath(filesystem.destination)
-      guard contains(containerPath, inMount: destination) else { continue }
-      if let current = matchedDestination, current.count >= destination.count {
-        continue
-      }
-
-      matchedDestination = destination
-      matchedAttachment = attachment
-      matchedReadOnly = filesystem.options.contains("ro")
-    }
-
-    guard let destination = matchedDestination, let attachment = matchedAttachment else {
-      return ResolvedContainerPath(
-        url: append(containerPath: containerPath, toGuestRoot: controller.rootPath),
-        readOnly: false
-      )
-    }
-
-    let relative: String
-    if containerPath == destination {
-      relative = ""
-    } else if destination == "/" {
-      relative = String(containerPath.dropFirst())
-    } else {
-      relative = String(containerPath.dropFirst(destination.count + 1))
-    }
-
-    let guestPath = relative.isEmpty
-      ? URL(filePath: attachment.stagingPath)
-      : URL(filePath: attachment.stagingPath).appending(path: relative)
-    return ResolvedContainerPath(url: guestPath, readOnly: matchedReadOnly)
-  }
-
-  private static func normalizedAbsolutePath(_ path: String) -> String {
-    let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
-    guard normalized.count > 1 else { return "/" }
-    return normalized.hasSuffix("/") ? String(normalized.dropLast()) : normalized
-  }
-
-  private static func contains(_ path: String, inMount mount: String) -> Bool {
-    if mount == "/" { return path.hasPrefix("/") }
-    return path == mount || path.hasPrefix("\(mount)/")
-  }
-
-  private static func append(containerPath: String, toGuestRoot rootPath: String) -> URL {
-    if containerPath == "/" {
-      return URL(filePath: rootPath)
-    }
-    return URL(filePath: rootPath).appending(path: String(containerPath.dropFirst()))
   }
 
   private static func resolveCopyInGuestPath(

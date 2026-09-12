@@ -11,8 +11,9 @@ public struct KrunSocketLayout: Sendable {
   public let controlPath: String
   public let ioEntries: [IOEntry]
   public let copyEntries: [IOEntry]
+  public let relayMappings: [KrunVsockMapping]
 
-  public init(id: String) {
+  public init(id: String, relayMappings: [KrunVsockMapping] = []) {
     let safeID = String(id.prefix(12)).replacingOccurrences(of: "/", with: "_")
     let directory = URL(
       fileURLWithPath: "/tmp/ckr-\(safeID)-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -30,11 +31,13 @@ public struct KrunSocketLayout: Sendable {
         path: directory.appendingPathComponent(String(format: "c%02d", index)).path
       )
     }
+    self.relayMappings = relayMappings
   }
 
   public var mappings: [KrunVsockMapping] {
     [KrunVsockMapping(port: KrunDefaults.controlPort, path: controlPath, listen: true)]
       + ioEntries.map { KrunVsockMapping(port: $0.port, path: $0.path, listen: false) }
       + copyEntries.map { KrunVsockMapping(port: $0.port, path: $0.path, listen: false) }
+      + relayMappings
   }
 }

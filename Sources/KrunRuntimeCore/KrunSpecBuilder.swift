@@ -16,6 +16,7 @@ public enum KrunSpecBuilder {
       process: process,
       rootPath: rootPath,
       volumeAttachments: [],
+      socketMounts: [],
       wrapWithInit: wrapWithInit
     )
   }
@@ -25,6 +26,7 @@ public enum KrunSpecBuilder {
     process: ProcessConfiguration,
     rootPath: String,
     volumeAttachments: [KrunVolumeAttachment],
+    socketMounts: [ContainerizationOCI.Mount] = [],
     wrapWithInit: Bool = false
   ) throws -> Spec {
     let safe = ["nosuid", "noexec", "nodev"]
@@ -52,6 +54,7 @@ public enum KrunSpecBuilder {
       for: container,
       attachments: volumeAttachments
     ))
+    mounts.append(contentsOf: socketMounts)
     if wrapWithInit {
       mounts.append(
         .init(
@@ -86,10 +89,18 @@ public enum KrunSpecBuilder {
 
     let arguments =
       (wrapWithInit ? ["/.cz-init", "--"] : []) + [process.executable] + process.arguments
+    var environment = process.environment
+    if container.ssh,
+      !environment.contains(where: { $0.hasPrefix("\(KrunUnixSocketRelays.sshAuthSocketEnvVar)=") })
+    {
+      environment.append(
+        "\(KrunUnixSocketRelays.sshAuthSocketEnvVar)=\(KrunUnixSocketRelays.sshGuestPath)"
+      )
+    }
     let ociProcess = ContainerizationOCI.Process(
       args: arguments,
       cwd: process.workingDirectory,
-      env: process.environment,
+      env: environment,
       capabilities: caps.toOCI(),
       user: user,
       rlimits: process.rlimits.map {

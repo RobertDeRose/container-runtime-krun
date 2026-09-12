@@ -21,6 +21,11 @@ public final class KrunVMController: @unchecked Sendable {
   public let socketLayout: KrunSocketLayout
   public let agent: Vminitd
   let volumeAttachments: [KrunVolumeAttachment]
+  let socketRelays: [KrunUnixSocketRelay]
+
+  var socketMounts: [ContainerizationOCI.Mount] {
+    KrunUnixSocketRelays.ociMounts(socketRelays)
+  }
 
   private let helper: Foundation.Process
   let eventLoopGroup: MultiThreadedEventLoopGroup
@@ -35,6 +40,7 @@ public final class KrunVMController: @unchecked Sendable {
     socketLayout: KrunSocketLayout,
     agent: Vminitd,
     volumeAttachments: [KrunVolumeAttachment],
+    socketRelays: [KrunUnixSocketRelay],
     helper: Foundation.Process,
     group: MultiThreadedEventLoopGroup,
     log: Logger,
@@ -47,6 +53,7 @@ public final class KrunVMController: @unchecked Sendable {
     self.socketLayout = socketLayout
     self.agent = agent
     self.volumeAttachments = volumeAttachments
+    self.socketRelays = socketRelays
     self.helper = helper
     self.eventLoopGroup = group
     self.log = log
@@ -58,6 +65,7 @@ public final class KrunVMController: @unchecked Sendable {
     helperPath: String,
     networkConfigs: [KrunNetworkConfig] = [],
     networkAttachments: [Attachment] = [],
+    dynamicEnv: [String: String] = [:],
     lifecycleStartedAt: ContinuousClock.Instant = ContinuousClock.now,
     libkrunPath: String = KrunDefaults.libkrunPath,
     log: Logger
@@ -80,6 +88,14 @@ public final class KrunVMController: @unchecked Sendable {
       try requireExt4Block(initfs, name: "initial filesystem")
       try requireExt4Block(rootfs, name: "container root filesystem")
       let volumeAttachments = try KrunVolumeLayout.attachments(for: config)
+      let rootPath = KrunSpecBuilder.guestRootPath(containerID: config.id)
+      let socketRelays = try KrunUnixSocketRelays.make(
+        config: config,
+        dynamicEnv: dynamicEnv,
+        rootPath: rootPath,
+        volumeAttachments: volumeAttachments
+      )
+      try KrunUnixSocketRelays.prepareHostPaths(socketRelays)
 
       guard FileManager.default.isReadableFile(atPath: helperPath) else {
         throw ContainerizationError(
@@ -89,7 +105,10 @@ public final class KrunVMController: @unchecked Sendable {
         throw ContainerizationError(.notFound, message: "libkrun is not readable at \(libkrunPath)")
       }
 
-      let layout = KrunSocketLayout(id: config.id)
+      let layout = KrunSocketLayout(
+        id: config.id,
+        relayMappings: socketRelays.map(\.mapping)
+      )
       try FileManager.default.createDirectory(
         at: layout.directory,
         withIntermediateDirectories: false,
@@ -155,6 +174,7 @@ public final class KrunVMController: @unchecked Sendable {
           lifecycleStartedAt: lifecycleStartedAt
         )
         cleanupAgent = agent
+        try KrunUnixSocketRelays.applyHostPermissions(socketRelays)
         KrunLifecycleTrace.mark(
           log,
           startedAt: lifecycleStartedAt,
@@ -170,7 +190,6 @@ public final class KrunVMController: @unchecked Sendable {
           startedAt: lifecycleStartedAt,
           event: "guest setup complete"
         )
-        let rootPath = KrunSpecBuilder.guestRootPath(containerID: config.id)
         KrunLifecycleTrace.mark(
           log,
           startedAt: lifecycleStartedAt,
@@ -206,6 +225,15 @@ public final class KrunVMController: @unchecked Sendable {
             metadata: ["volume_index": "\(index)"]
           )
         }
+        try await KrunUnixSocketRelays.start(socketRelays, agent: agent)
+        if !socketRelays.isEmpty {
+          KrunLifecycleTrace.mark(
+            log,
+            startedAt: lifecycleStartedAt,
+            event: "Unix socket relays ready",
+            metadata: ["relay_count": "\(socketRelays.count)"]
+          )
+        }
         if !networkAttachments.isEmpty {
           KrunLifecycleTrace.mark(
             log,
@@ -236,6 +264,7 @@ public final class KrunVMController: @unchecked Sendable {
           socketLayout: layout,
           agent: agent,
           volumeAttachments: volumeAttachments,
+          socketRelays: socketRelays,
           helper: helper,
           group: group,
           log: log,
@@ -243,6 +272,7 @@ public final class KrunVMController: @unchecked Sendable {
         )
       } catch {
         if let cleanupAgent {
+          await KrunUnixSocketRelays.stop(socketRelays, agent: cleanupAgent)
           for volume in volumeAttachments.reversed() {
             try? await cleanupAgent.umount(path: volume.stagingPath, flags: 0)
           }
@@ -254,12 +284,17 @@ public final class KrunVMController: @unchecked Sendable {
           try? await cleanupAgent.close()
         }
         terminate(helper)
+        KrunUnixSocketRelays.cleanupHostPaths(socketRelays)
         try? helperLog.close()
         try? await group.shutdownGracefully()
         try? FileManager.default.removeItem(at: layout.directory)
         throw error
       }
     #endif
+  }
+
+  func stopSocketRelays() async {
+    await KrunUnixSocketRelays.stop(socketRelays, agent: agent)
   }
 
   func unmountFilesystems() async {
@@ -271,6 +306,7 @@ public final class KrunVMController: @unchecked Sendable {
   }
 
   public func shutdownGuest() async {
+    await stopSocketRelays()
     await unmountFilesystems()
     await shutdownVMM()
   }
@@ -292,8 +328,10 @@ public final class KrunVMController: @unchecked Sendable {
   }
 
   public func shutdownVMM() async {
+    await stopSocketRelays()
     try? await agent.close()
     Self.terminate(helper)
+    KrunUnixSocketRelays.cleanupHostPaths(socketRelays)
     try? helperLogHandle.close()
     try? await eventLoopGroup.shutdownGracefully()
     try? FileManager.default.removeItem(at: socketLayout.directory)

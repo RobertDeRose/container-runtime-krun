@@ -9,9 +9,6 @@ public enum KrunFeatureGate {
     if !config.publishedPorts.isEmpty && config.networks.isEmpty {
       throw unsupported("published TCP/UDP ports without a network attachment")
     }
-    if !config.publishedSockets.isEmpty {
-      throw unsupported("published Unix sockets")
-    }
     if config.rosetta {
       throw ContainerizationError(
         .unsupported,
@@ -21,9 +18,6 @@ public enum KrunFeatureGate {
     }
     if config.virtualization {
       throw unsupported("nested virtualization")
-    }
-    if config.ssh {
-      throw unsupported("SSH agent forwarding")
     }
     for mount in config.mounts {
       switch mount.type {

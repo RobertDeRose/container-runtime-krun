@@ -82,6 +82,7 @@ public actor KrunRuntimeService {
     lifecycleStartedAt = startedAt
     KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "bootstrap start")
     let networkInfos = try message.networkBootstrapInfos()
+    let dynamicEnv = try message.dynamicEnvironment()
 
     let bundle = try ensureBundle()
     let containerConfig = try bundle.configuration
@@ -99,6 +100,7 @@ public actor KrunRuntimeService {
         helperPath: helperPath,
         networkConfigs: networkResources.backends.map(\.networkConfig),
         networkAttachments: networkResources.attachments,
+        dynamicEnv: dynamicEnv,
         lifecycleStartedAt: startedAt,
         log: log
       )
@@ -205,6 +207,7 @@ public actor KrunRuntimeService {
         process: record.configuration,
         rootPath: controller.rootPath,
         volumeAttachments: controller.volumeAttachments,
+        socketMounts: controller.socketMounts,
         wrapWithInit: isInit && containerConfig.useInit
       )
       try await processAgent.createProcess(
@@ -562,6 +565,7 @@ public actor KrunRuntimeService {
       }
       try? await record.agent?.close()
     }
+    await controller.stopSocketRelays()
     if let containerID {
       await controller.unmountFilesystems()
       try? await controller.agent.deleteProcess(id: containerID, containerID: containerID)
@@ -821,6 +825,13 @@ extension XPCMessage {
       fileHandle(key: RuntimeKeys.stdout.rawValue),
       fileHandle(key: RuntimeKeys.stderr.rawValue),
     ]
+  }
+
+  fileprivate func dynamicEnvironment() throws -> [String: String] {
+    guard let data = dataNoCopy(key: RuntimeKeys.dynamicEnv.rawValue) else {
+      return [:]
+    }
+    return try JSONDecoder().decode([String: String].self, from: data)
   }
 
   fileprivate func processConfiguration() throws -> ProcessConfiguration {

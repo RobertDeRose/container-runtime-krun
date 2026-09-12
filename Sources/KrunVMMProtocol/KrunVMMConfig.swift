@@ -105,6 +105,7 @@ public enum KrunDefaults {
   public static let ioPortCount = 96
   public static let firstCopyPort: UInt32 = firstIOPort + UInt32(ioPortCount)
   public static let copyPortCount = 8
+  public static let firstRelayPort: UInt32 = firstCopyPort + UInt32(copyPortCount)
   public static let memoryOverheadBytes: UInt64 = 128 * 1024 * 1024
   public static let maxVolumeCount = 24
 

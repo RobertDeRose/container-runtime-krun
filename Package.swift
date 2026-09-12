@@ -5,6 +5,7 @@ import PackageDescription
 let containerRevision = "eee7ad097079cc3b02d5309ec10160143f2d0c6a"
 let containerizationVersion = Version(0, 43, 0)
 let grpcSwiftVersion = Version(2, 4, 3)
+let swiftSystemVersion = Version(1, 8, 1)
 
 let package = Package(
   name: "container-runtime-krun",
@@ -22,6 +23,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-log.git", from: "1.10.1"),
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
     .package(url: "https://github.com/grpc/grpc-swift-2.git", exact: grpcSwiftVersion),
+    .package(url: "https://github.com/apple/swift-system.git", exact: swiftSystemVersion),
   ],
   targets: [
     .target(name: "KrunVMMProtocol"),
@@ -42,6 +44,7 @@ let package = Package(
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),
         .product(name: "GRPCCore", package: "grpc-swift-2"),
+        .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
     .executableTarget(
@@ -64,8 +67,10 @@ let package = Package(
       name: "KrunRuntimeCoreTests",
       dependencies: [
         "KrunRuntimeCore",
+        "KrunVMMProtocol",
         .product(name: "ContainerResource", package: "container"),
         .product(name: "ContainerizationOCI", package: "containerization"),
+        .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
   ]
