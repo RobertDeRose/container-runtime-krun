@@ -158,11 +158,11 @@ There is no runtime-side balloon controller. That is intentional.
 
 The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO_BALLOON_F_REPORTING`. Once negotiated, Linux reports unused pages and libkrun marks the corresponding host mappings with `MADV_FREE` on macOS. Host reclamation therefore follows guest memory availability without an application-level feedback loop or a second state machine.
 
-## v0.2 unsupported surface
+## Current deferred surface
 
-Multiple network attachments, host directory/virtio-fs mounts, published Unix sockets, arbitrary `dial`, snapshots, trim, Rosetta, nested virtualization, SSH forwarding, and `--init` return explicit unsupported errors. `copyIn` / `copyOut` and Apple block-backed volumes are enabled by v0.3 slices.
+Multiple network attachments, host directory/virtio-fs mounts, published Unix sockets, arbitrary `dial`, snapshots, trim, Rosetta, nested virtualization, and SSH forwarding remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. `--init` is enabled by the first v0.4 parity slice.
 
-This is intentional. v0.2 keeps the working packet path and published TCP/UDP forwarding narrow while deferring unrelated host-integration and multi-network work.
+Rosetta is intentionally not part of the active parity roadmap. Its integration is specific to Apple's Virtualization.framework-backed runtime, and users requiring x86_64 emulation should use Apple's official runtime.
 
 ## Next milestones
 
@@ -184,4 +184,8 @@ Published Unix sockets can use fixed mappings known before boot plus vminitd's e
 
 ### v0.4: parity and benchmarks
 
-Add Rosetta/remaining lifecycle behavior where justified and publish repeatable comparisons against `container-runtime-linux`: boot latency, idle RSS, memory returned after workload release, pressure behavior, CPU overhead, and compatibility coverage.
+Add selected parity features in independent slices: `--init`, published Unix sockets and SSH forwarding, running-container snapshot/export, and nested virtualization where libkrun and the host support it. Publish repeatable comparisons against `container-runtime-linux`: boot latency, idle RSS, memory returned after workload release, pressure behavior, CPU overhead, and compatibility coverage.
+
+The `--init` slice mirrors Apple Containerization's existing behavior without introducing another init implementation: the guest `/sbin/vminitd` binary is bind-mounted read-only at `/.cz-init`, and only the container's initial OCI process is rewritten to `/.cz-init -- <workload>`. `container exec` processes remain direct exec processes.
+
+Rosetta is deliberately excluded from v0.4 and from the active roadmap. If x86_64 emulation is required, use Apple's official runtime.

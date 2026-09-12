@@ -120,7 +120,7 @@ The validator starts one networked container with both a loopback TCP publicatio
 
 The runtime uses Apple Container's public `SocketForwarder` implementation and the Apple-assigned attachment address; the validator does not create a second forwarding or IPAM mechanism. Results are packaged as `validation-results/container-runtime-krun-ports-*.tar.gz`.
 
-## Gate 8: fail-closed v0.2 boundaries
+## Gate 8: remaining fail-closed boundaries
 
 Verify each remaining unsupported feature produces an explicit error before VM startup where possible:
 
@@ -129,10 +129,9 @@ Verify each remaining unsupported feature produces an explicit error before VM s
 - publish a Unix socket;
 - request Rosetta;
 - request nested virtualization;
-- request SSH forwarding;
-- request `--init`.
+- request SSH forwarding.
 
-Runtime-only unsupported routes (`dial`, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding. Copy moves out of this gate once the v0.3 copy slice is enabled and is covered by Gate 9 instead.
+Runtime-only unsupported routes (`dial`, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy and `--init` are covered by their dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 
@@ -155,3 +154,13 @@ scripts/validate_volumes.sh --install
 ```
 
 The validator uses Apple Container's own volume service and `-v` parsing. It verifies named-volume persistence across VM recreation, read-only exposure, multiple independent volumes, repeated destinations for one backing volume, anonymous volume allocation, copy/statistics compatibility, Apple-owned volume deletion, and final VMM/socket cleanup. The runtime must not create a second volume registry or persistent metadata store.
+
+## Gate 11: v0.4 minimal init
+
+Validate `--init` with:
+
+```bash
+scripts/validate_init.sh --install
+```
+
+The validator proves that the requested workload is no longer PID 1, preserves workload exit status, forwards stdin/stdout and terminal I/O, leaves `container exec` usable, reaps an orphaned grandchild without leaving a PID-1 zombie, forwards `SIGTERM` to the workload while preserving its trapped exit status, and leaves no VMM helper or private socket-directory leak after cleanup.

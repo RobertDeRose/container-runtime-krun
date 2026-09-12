@@ -8,7 +8,7 @@ No changes to `apple/container` or `apple/containerization` are required. The pl
 
 ## Current scope
 
-v0.2.0 established the lifecycle and networking baseline. Development on v0.3 adds host integration in independent slices:
+v0.3.0 establishes the lifecycle, networking, copy, and block-backed volume baseline. Development on v0.4 adds selected runtime-parity features in independent slices:
 
 | Capability | Current |
 | --- | --- |
@@ -28,12 +28,12 @@ v0.2.0 established the lifecycle and networking baseline. Development on v0.3 ad
 | Arbitrary runtime `dial(port)` | no |
 | `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
 | Disk snapshot / trim | no |
-| Rosetta | no |
+| Rosetta | no, intentionally deferred; use Apple's official runtime for x86_64 emulation |
 | Nested virtualization | no |
 | SSH agent forwarding | no |
-| `--init` | no |
+| `--init` | yes, guest vminitd mounted as the minimal container init |
 
-Unsupported features fail with `ContainerizationError(.unsupported)` rather than silently degrading.
+Remaining unsupported features fail with `ContainerizationError(.unsupported)` rather than silently degrading. Rosetta is intentionally deferred; users requiring x86_64 emulation should use Apple's official runtime.
 
 v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` plugin through `vmnet-helper`. Apple's default macOS 26 `reserved` variant is intentionally unsupported: macOS only permits `vmnet_interface_start_with_network` to consume a serialized network when the consuming executable has the same identity as the executable that created it, while Apple crosses that boundary through Virtualization.framework. `--network none` remains supported.
 
@@ -99,6 +99,16 @@ container run --rm \
   --runtime container-runtime-krun \
   --network none \
   alpine:3.20 echo hello-from-libkrun
+```
+
+Run a workload under the minimal init process for signal forwarding and zombie reaping:
+
+```bash
+container run --rm \
+  --runtime container-runtime-krun \
+  --network none \
+  --init \
+  alpine:3.20 sh -c 'echo pid=$$; sleep 1'
 ```
 
 For networking, create a non-overlapping `allocationOnly` network once and select it explicitly:

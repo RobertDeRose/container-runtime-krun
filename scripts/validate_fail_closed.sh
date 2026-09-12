@@ -11,9 +11,9 @@ DIAL_HELPER=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/validate_gate8.sh [options]
+Usage: scripts/validate_fail_closed.sh [options]
 
-Validate the v0.2 fail-closed feature boundaries through the real Apple
+Validate the remaining fail-closed feature boundaries through the real Apple
 Container control plane. Configuration-time feature gates must reject before
 VM startup. Runtime-only routes are exercised against one live krun container.
 
@@ -319,7 +319,7 @@ run_feature_gate_case() {
   local expected_feature="$2"
   shift 2
   local id="$PREFIX-$suffix"
-  local expected="container-runtime-krun v0.2 does not support $expected_feature"
+  local expected="container-runtime-krun does not support $expected_feature"
 
   record_config_id "$id"
   expect_unsupported "feature-$suffix" "$expected" \
@@ -419,7 +419,7 @@ run_feature_gate_case \
 
 run_feature_gate_case \
   rosetta \
-  "Rosetta" \
+  "Rosetta; use Apple's official runtime for x86_64 emulation" \
   --network none \
   --rosetta \
   "$IMAGE" true
@@ -436,13 +436,6 @@ run_feature_gate_case \
   "SSH agent forwarding" \
   --network none \
   --ssh \
-  "$IMAGE" true
-
-run_feature_gate_case \
-  init \
-  "--init" \
-  --network none \
-  --init \
   "$IMAGE" true
 
 # This boundary is implemented by the same feature gate even though the Gate 8
@@ -483,7 +476,7 @@ capture_runtime_state "$RESULT_DIR/runtime-state-routes-live.txt"
 
 expect_unsupported \
   route-snapshot \
-  "container-runtime-krun v0.2 does not support runtime route snapshotDisk" \
+  "container-runtime-krun does not support runtime route snapshotDisk" \
   container export --output "$RESULT_DIR/runtime-export.tar" "$ROUTE_ID"
 
 # `container clean` was added after Container 1.3.1. Exercise the runtime
@@ -493,7 +486,7 @@ expect_unsupported \
 if container clean --help >"$RESULT_DIR/route-clean-availability.txt" 2>&1; then
   expect_unsupported \
     route-clean \
-    "container-runtime-krun v0.2 does not support runtime route clean" \
+    "container-runtime-krun does not support runtime route clean" \
     container clean "$ROUTE_ID"
 else
   skip "route-clean not behaviorally reachable: installed Container CLI does not expose the clean command"
@@ -506,7 +499,7 @@ if [[ -n "$DIAL_HELPER" ]]; then
   if [[ -x "$DIAL_HELPER" ]]; then
     expect_unsupported \
       route-dial \
-      "container-runtime-krun v0.2 does not support runtime route dial" \
+      "container-runtime-krun does not support runtime route dial" \
       "$DIAL_HELPER" "$ROUTE_ID" 12345
   else
     fail "dial helper is not executable: $DIAL_HELPER"
@@ -561,7 +554,7 @@ fi
 
 # Preserve the relevant runtime/control-plane messages for review.
 container system logs --debug --last 15m >"$RESULT_DIR/system-logs-final.txt" 2>&1 || true
-grep -E "$PREFIX|container-runtime-krun v0\.2 does not support" \
+grep -E "$PREFIX|container-runtime-krun does not support" \
   "$RESULT_DIR/system-logs-final.txt" >"$RESULT_DIR/system-logs-relevant.txt" 2>/dev/null || true
 
 {
