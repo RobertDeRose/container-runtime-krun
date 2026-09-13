@@ -542,7 +542,7 @@ for i in 1 2 3 4; do
 done
 
 # Runtime errors must not poison the container or leak the transfer slot.
-expect_failure_matching copy_out_missing "copy: path not found" \
+expect_failure_matching copy_out_missing "stat: path not found" \
   container copy "$CONTAINER_ID:/copy/does-not-exist" "$OUTPUTS/missing"
 if [[ "$(container exec "$CONTAINER_ID" sh -c 'printf copy-health-ok' 2>/dev/null || true)" == "copy-health-ok" ]]; then
   pass "container usable after rejected copy"

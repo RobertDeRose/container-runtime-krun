@@ -63,15 +63,37 @@ run_bounded(){
   local timeout_seconds="$1"
   shift
   python3 - "$timeout_seconds" "$@" <<'PY'
+import os
+import signal
 import subprocess
 import sys
 
 timeout, *cmd = sys.argv[1:]
+proc = subprocess.Popen(cmd, start_new_session=True)
+
+def terminate_group():
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
 try:
-    raise SystemExit(subprocess.run(cmd, timeout=int(timeout)).returncode)
+    raise SystemExit(proc.wait(timeout=int(timeout)))
 except subprocess.TimeoutExpired:
     print(f"command timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
+    terminate_group()
     raise SystemExit(124)
+except KeyboardInterrupt:
+    terminate_group()
+    raise SystemExit(130)
 PY
 }
 
@@ -121,17 +143,39 @@ time_cmd(){
   local runtime="$1" metric="$2" iteration="$3"; shift 3
   progress "$runtime: $metric sample $iteration"
   python3 - "$SAMPLES" "$runtime" "$metric" "$iteration" "$COMMAND_TIMEOUT_SECONDS" "$@" <<'PY'
+import os
+import signal
 import subprocess
 import sys
 import time
 
 out, runtime, metric, iteration, timeout, *cmd = sys.argv[1:]
 start = time.perf_counter_ns()
+proc = subprocess.Popen(cmd, start_new_session=True)
+
+def terminate_group():
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
 try:
-    status = subprocess.run(cmd, timeout=int(timeout)).returncode
+    status = proc.wait(timeout=int(timeout))
 except subprocess.TimeoutExpired:
     status = 124
     print(f"command timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
+    terminate_group()
+except KeyboardInterrupt:
+    terminate_group()
+    raise SystemExit(130)
 ms = (time.perf_counter_ns() - start) / 1_000_000
 with open(out, 'a') as f:
     f.write(f"{runtime}\t{metric}\t{iteration}\t{ms:.3f}\t{status}\n")
