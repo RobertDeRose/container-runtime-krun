@@ -44,6 +44,27 @@ pass(){ PASSES=$((PASSES+1)); echo "PASS: $*" | tee -a "$OUT/results.txt"; }
 fail(){ FAILURES=$((FAILURES+1)); echo "FAIL: $*" | tee -a "$OUT/results.txt" >&2; }
 run(){ local n="$1"; shift; { printf '$'; printf ' %q' "$@"; printf '\n'; "$@"; local r=$?; printf '\nexit_status=%d\n' "$r"; return "$r"; } >"$OUT/$n.txt" 2>&1; }
 wait_cleanup(){ local deadline=$((SECONDS+10)); while ((SECONDS<deadline)); do /bin/ps -axo command= | grep -F -- "$ID" | grep -Eq 'container-runtime-krun|container-krun-vmm-helper' || return 0; sleep .2; done; return 1; }
+archive_results(){
+  {
+    echo "runtime=$RUNTIME"
+    echo "image=$IMAGE"
+    echo "passes=$PASSES"
+    echo "failures=$FAILURES"
+  } >"$OUT/SUMMARY.txt"
+  tar -czf "$ARCHIVE" -C "$RESULT_ROOT" "$(basename "$OUT")"
+  echo "archive: $ARCHIVE"
+}
+require_run(){
+  local name="$1" label="$2"
+  shift 2
+  if run "$name" "$@"; then
+    pass "$label"
+    return 0
+  fi
+  fail "$label"
+  archive_results
+  exit 1
+}
 cleanup(){ container delete --force "$ID" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
@@ -55,19 +76,19 @@ trap cleanup EXIT INT TERM
 } >"$OUT/environment.txt"
 
 if ((INSTALL)); then
-  run make_doctor make doctor && pass "make doctor" || fail "make doctor"
-  run make_check make check && pass "make check" || fail "make check"
-  run make_test make test && pass "make test" || fail "make test"
-  if ((FAILURES)); then tar -czf "$ARCHIVE" -C "$RESULT_ROOT" "$(basename "$OUT")"; exit 1; fi
-  run make_install make install && pass "make install" || fail "make install"
-  run system_stop container system stop && pass "container system stop" || fail "container system stop"
-  run system_start container system start && pass "container system start" || fail "container system start"
+  require_run make_doctor "make doctor" make doctor
+  require_run make_check "make check" make check
+  require_run make_test "make test" make test
+  require_run make_install "make install" make install
+  require_run system_stop "container system stop" container system stop
+  require_run system_start "container system start" container system start
 fi
 
-run start container run -d --name "$ID" --runtime "$RUNTIME" --network none "$IMAGE" sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' \
-  && pass "snapshot test container started" || fail "snapshot test container started"
-run seed container exec "$ID" sh -c 'printf before-export >/snapshot-before.txt; sync' \
-  && pass "seeded root filesystem" || fail "seeded root filesystem"
+require_run start "snapshot test container started" \
+  container run -d --name "$ID" --runtime "$RUNTIME" --network none "$IMAGE" \
+  sh -c 'trap "exit 0" TERM; while :; do sleep 1; done'
+require_run seed "seeded root filesystem" \
+  container exec "$ID" sh -c 'printf before-export >/snapshot-before.txt; sync'
 
 LIVE_TAR="$OUT/live-export.tar"
 run live_export container export --output "$LIVE_TAR" "$ID" && pass "live container export" || fail "live container export"
@@ -102,13 +123,6 @@ run stop container stop "$ID" && pass "container stopped" || fail "container sto
 run delete container delete "$ID" && pass "container deleted" || fail "container deleted"
 wait_cleanup && pass "snapshot runtime/helper cleanup" || fail "snapshot runtime/helper cleanup"
 
-{
-  echo "runtime=$RUNTIME"
-  echo "image=$IMAGE"
-  echo "passes=$PASSES"
-  echo "failures=$FAILURES"
-} >"$OUT/SUMMARY.txt"
-tar -czf "$ARCHIVE" -C "$RESULT_ROOT" "$(basename "$OUT")"
-echo "archive: $ARCHIVE"
+archive_results
 trap - EXIT INT TERM
 ((FAILURES==0))
