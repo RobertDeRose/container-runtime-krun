@@ -1,5 +1,7 @@
 import ContainerResource
+import Darwin
 import ContainerizationOCI
+import Foundation
 import KrunVMMProtocol
 import SystemPackage
 import Testing
@@ -20,6 +22,28 @@ import Testing
   #expect(layout.mappings.count == guestToHostEntries.count + 1)
   #expect(layout.mappings.first?.listen == true)
   #expect(layout.mappings.dropFirst().allSatisfy { !$0.listen })
+}
+
+@Test func copyPortPoolRotatesReleasedMappings() async throws {
+  let entries = (0..<3).map { index in
+    KrunSocketLayout.IOEntry(port: UInt32(index), path: "/tmp/copy-\(index)")
+  }
+  let pool = KrunPortPool(entries: entries, name: "copy", rotateReleased: true)
+
+  let first = try await pool.take(1)
+  #expect(first.map(\.port) == [0])
+  await pool.put(first)
+
+  let second = try await pool.take(1)
+  #expect(second.map(\.port) == [1])
+  await pool.put(second)
+
+  let third = try await pool.take(1)
+  #expect(third.map(\.port) == [2])
+  await pool.put(third)
+
+  let wrapped = try await pool.take(1)
+  #expect(wrapped.map(\.port) == [0])
 }
 
 @Test func specBuilderWrapsOnlyTheInitProcess() throws {
@@ -178,4 +202,142 @@ import Testing
   ]
 
   try KrunFeatureGate.validate(container)
+}
+
+@Test func copyBytesHonorsKnownPayloadLength() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let source = directory.appendingPathComponent("source.bin")
+  let destination = directory.appendingPathComponent("destination.bin")
+  try Data("payloadtrailing".utf8).write(to: source)
+  _ = FileManager.default.createFile(atPath: destination.path, contents: Data())
+
+  let sourceHandle = try FileHandle(forReadingFrom: source)
+  let destinationHandle = try FileHandle(forWritingTo: destination)
+  defer {
+    try? sourceHandle.close()
+    try? destinationHandle.close()
+  }
+
+  try KrunCopyTransfer.copyBytes(
+    from: sourceHandle.fileDescriptor,
+    to: destinationHandle.fileDescriptor,
+    chunkSize: 3,
+    operation: "test",
+    byteCount: 7
+  )
+
+  #expect(try Data(contentsOf: destination) == Data("payload".utf8))
+}
+
+@Test func copyBytesRejectsEarlyEOFForKnownPayloadLength() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let source = directory.appendingPathComponent("source.bin")
+  let destination = directory.appendingPathComponent("destination.bin")
+  try Data("short".utf8).write(to: source)
+  _ = FileManager.default.createFile(atPath: destination.path, contents: Data())
+
+  let sourceHandle = try FileHandle(forReadingFrom: source)
+  let destinationHandle = try FileHandle(forWritingTo: destination)
+  defer {
+    try? sourceHandle.close()
+    try? destinationHandle.close()
+  }
+
+  var rejected = false
+  do {
+    try KrunCopyTransfer.copyBytes(
+      from: sourceHandle.fileDescriptor,
+      to: destinationHandle.fileDescriptor,
+      chunkSize: 3,
+      operation: "test",
+      byteCount: 6
+    )
+  } catch {
+    rejected = true
+  }
+  #expect(rejected)
+}
+
+@Test func copyInputFinishHalfClosesTheWriteSide() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let source = directory.appendingPathComponent("source.bin")
+  try Data("payload".utf8).write(to: source)
+
+  var descriptors = [Int32](repeating: -1, count: 2)
+  #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
+  let sender = FileHandle(fileDescriptor: descriptors[0], closeOnDealloc: true)
+  let receiver = FileHandle(fileDescriptor: descriptors[1], closeOnDealloc: true)
+  defer {
+    try? sender.close()
+    try? receiver.close()
+  }
+
+  try await KrunCopyTransfer.send(
+    source: source,
+    isArchive: false,
+    to: sender,
+    chunkSize: 3
+  )
+
+  var payload = [UInt8](repeating: 0, count: 7)
+  let received = read(receiver.fileDescriptor, &payload, payload.count)
+  #expect(received == payload.count)
+  #expect(Data(payload) == Data("payload".utf8))
+
+  var eofByte: UInt8 = 0
+  #expect(read(receiver.fileDescriptor, &eofByte, 1) == 0)
+
+  let reply = Data("x".utf8)
+  let replyCount = reply.withUnsafeBytes { buffer in
+    write(receiver.fileDescriptor, buffer.baseAddress, buffer.count)
+  }
+  #expect(replyCount == 1)
+
+  var response: UInt8 = 0
+  #expect(read(sender.fileDescriptor, &response, 1) == 1)
+  #expect(response == 120)
+}
+
+@Test func copyOutMetadataValidationRejectsChangedSource() throws {
+  try KrunCopyOperations.validateCopyOutMetadata(
+    isArchive: false,
+    totalSize: 1024,
+    expectedArchive: false,
+    expectedSize: 1024
+  )
+
+  var typeMismatchRejected = false
+  do {
+    try KrunCopyOperations.validateCopyOutMetadata(
+      isArchive: true,
+      totalSize: 0,
+      expectedArchive: false,
+      expectedSize: 1024
+    )
+  } catch {
+    typeMismatchRejected = true
+  }
+  #expect(typeMismatchRejected)
+
+  var sizeMismatchRejected = false
+  do {
+    try KrunCopyOperations.validateCopyOutMetadata(
+      isArchive: false,
+      totalSize: 2048,
+      expectedArchive: false,
+      expectedSize: 1024
+    )
+  } catch {
+    sizeMismatchRejected = true
+  }
+  #expect(sizeMismatchRejected)
 }

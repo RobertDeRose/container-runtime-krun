@@ -121,7 +121,14 @@ public actor KrunRuntimeService {
     }
 
     let pool = KrunPortPool(entries: controller.socketLayout.ioEntries, name: "stdio")
-    let copyPool = KrunPortPool(entries: controller.socketLayout.copyEntries, name: "copy")
+    // libkrun 1.19.4 keeps closed vsock proxies in its reaper for five seconds.
+    // Rotate copy mappings so the next transfer does not immediately reopen the
+    // mapping whose previous connection is still quiescing.
+    let copyPool = KrunPortPool(
+      entries: controller.socketLayout.copyEntries,
+      name: "copy",
+      rotateReleased: true
+    )
     let stdio = message.stdioHandles()
 
     // Match Apple's runtime lifecycle boundary: bootstrap owns VM/guest setup only.

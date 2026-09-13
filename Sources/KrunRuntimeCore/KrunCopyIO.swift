@@ -28,50 +28,44 @@ enum KrunCopyOperations {
     }
     let isArchive = sourceIsDirectory.boolValue
 
-    let agent = try await controller.dialAgent()
-    do {
-      let resolvedDestination = KrunContainerPath.resolve(
-        controller: controller,
-        path: destination
+    let agent = controller.agent
+    let resolvedDestination = KrunContainerPath.resolve(
+      controller: controller,
+      path: destination
+    )
+    if resolvedDestination.readOnly {
+      throw ContainerizationError(
+        .invalidArgument,
+        message: "copyIn: destination is on a read-only volume mount: \(destination.path)"
       )
-      if resolvedDestination.readOnly {
-        throw ContainerizationError(
-          .invalidArgument,
-          message: "copyIn: destination is on a read-only volume mount: \(destination.path)"
+    }
+    let guestPath = try await resolveCopyInGuestPath(
+      source: source,
+      destination: destination,
+      sourceIsDirectory: isArchive,
+      guestDestination: resolvedDestination.url,
+      agent: agent
+    )
+    let channel = try await KrunCopyChannel.prepare(pool: pool)
+    try await run(channel: channel) { group in
+      group.addTask {
+        try await agent.copy(
+          direction: .copyIn,
+          guestPath: guestPath,
+          vsockPort: channel.port,
+          mode: mode,
+          createParents: createParents,
+          isArchive: isArchive
         )
       }
-      let guestPath = try await resolveCopyInGuestPath(
-        source: source,
-        destination: destination,
-        sourceIsDirectory: isArchive,
-        guestDestination: resolvedDestination.url,
-        agent: agent
-      )
-      let channel = try await KrunCopyChannel.prepare(pool: pool)
-      try await run(channel: channel) { group in
-        group.addTask {
-          try await agent.copy(
-            direction: .copyIn,
-            guestPath: guestPath,
-            vsockPort: channel.port,
-            mode: mode,
-            createParents: createParents,
-            isArchive: isArchive
-          )
-        }
-        group.addTask {
-          let connection = try await channel.accept()
-          try await KrunCopyTransfer.send(
-            source: source,
-            isArchive: isArchive,
-            to: connection
-          )
-        }
+      group.addTask {
+        let connection = try await channel.accept()
+        try await KrunCopyTransfer.send(
+          source: source,
+          isArchive: isArchive,
+          to: connection
+        )
       }
-      try await agent.close()
-    } catch {
-      try? await agent.close()
-      throw error
     }
   }
 
@@ -90,48 +84,77 @@ enum KrunCopyOperations {
     }
 
     let guestPath = KrunContainerPath.resolve(controller: controller, path: source).url
-    let agent = try await controller.dialAgent()
-    let channel: KrunCopyChannel
-    do {
-      channel = try await KrunCopyChannel.prepare(pool: pool)
-    } catch {
-      try? await agent.close()
-      throw error
-    }
+    let agent = controller.agent
 
+    // libkrun forwards all guest-to-host streams on one muxer thread. Learn the
+    // transfer shape first so the data socket can be drained as soon as it connects,
+    // without waiting for streamed copy metadata on the same vsock device.
+    let sourceStat = try await agent.stat(path: guestPath)
+    let preflightIsArchive = (sourceStat.mode & UInt32(S_IFMT)) == UInt32(S_IFDIR)
+    guard preflightIsArchive || sourceStat.size >= 0 else {
+      throw ContainerizationError(
+        .internalError,
+        message: "copyOut: source has invalid size: \(sourceStat.size)"
+      )
+    }
+    let preflightTotalSize = preflightIsArchive ? 0 : UInt64(sourceStat.size)
+    let channel = try await KrunCopyChannel.prepare(pool: pool)
     let (metadataStream, metadataContinuation) = AsyncStream.makeStream(
       of: Vminitd.CopyMetadata.self
     )
-    do {
-      try await run(channel: channel) { group in
-        group.addTask {
-          defer { metadataContinuation.finish() }
-          try await agent.copy(
-            direction: .copyOut,
-            guestPath: guestPath,
-            vsockPort: channel.port,
-            onMetadata: { metadata in
-              metadataContinuation.yield(metadata)
-              metadataContinuation.finish()
-            }
-          )
-        }
-        group.addTask {
-          guard let metadata = await metadataStream.first(where: { _ in true }) else {
-            throw ContainerizationError(.internalError, message: "copyOut: no metadata received")
+    try await run(channel: channel) { group in
+      group.addTask {
+        defer { metadataContinuation.finish() }
+        try await agent.copy(
+          direction: .copyOut,
+          guestPath: guestPath,
+          vsockPort: channel.port,
+          onMetadata: { metadata in
+            metadataContinuation.yield(metadata)
+            metadataContinuation.finish()
           }
-          let connection = try await channel.accept()
-          try await KrunCopyTransfer.receive(
-            destination: destination,
-            isArchive: metadata.isArchive,
-            from: connection
-          )
-        }
+        )
       }
-      try await agent.close()
-    } catch {
-      try? await agent.close()
-      throw error
+      group.addTask {
+        guard let metadata = await metadataStream.first(where: { _ in true }) else {
+          throw ContainerizationError(.internalError, message: "copyOut: no metadata received")
+        }
+        try validateCopyOutMetadata(
+          isArchive: metadata.isArchive,
+          totalSize: metadata.totalSize,
+          expectedArchive: preflightIsArchive,
+          expectedSize: preflightTotalSize
+        )
+      }
+      group.addTask {
+        let connection = try await channel.accept()
+        try await KrunCopyTransfer.receive(
+          destination: destination,
+          isArchive: preflightIsArchive,
+          totalSize: preflightTotalSize,
+          from: connection
+        )
+      }
+    }
+  }
+
+  static func validateCopyOutMetadata(
+    isArchive: Bool,
+    totalSize: UInt64,
+    expectedArchive: Bool,
+    expectedSize: UInt64
+  ) throws {
+    guard isArchive == expectedArchive else {
+      throw ContainerizationError(
+        .internalError,
+        message: "copyOut: source type changed while preparing transfer"
+      )
+    }
+    guard isArchive || totalSize == expectedSize else {
+      throw ContainerizationError(
+        .internalError,
+        message: "copyOut: source size changed while preparing transfer"
+      )
     }
   }
 
@@ -291,29 +314,43 @@ enum KrunCopyTransfer {
     chunkSize: Int = defaultChunkSize
   ) async throws {
     try await blocking {
-      defer { try? connection.close() }
-
       if isArchive {
         let writer = try ArchiveWriter(configuration: .init(format: .pax, filter: .gzip))
         try writer.open(fileDescriptor: connection.fileDescriptor)
         try writer.archiveDirectory(source)
         try writer.finishEncoding()
-        return
+      } else {
+        let sourceFD = open(source.path, O_RDONLY)
+        guard sourceFD >= 0 else {
+          throw posixError("copyIn: failed to open '\(source.path)'")
+        }
+        defer { close(sourceFD) }
+
+        try copyBytes(
+          from: sourceFD,
+          to: connection.fileDescriptor,
+          chunkSize: chunkSize,
+          operation: "copyIn"
+        )
       }
 
-      let sourceFD = open(source.path, O_RDONLY)
-      guard sourceFD >= 0 else {
-        throw posixError("copyIn: failed to open '\(source.path)'")
-      }
-      defer { close(sourceFD) }
+      // vminitd frames copy-in with EOF. Keep the read half alive until the
+      // copy RPC completes so libkrun sees an orderly half-close instead of a
+      // host-side HANG_UP while the guest still owns the stream.
+      try finishWriting(connection.fileDescriptor)
+    }
+  }
 
-      try copyBytes(from: sourceFD, to: connection.fileDescriptor, chunkSize: chunkSize, operation: "copyIn")
+  static func finishWriting(_ fileDescriptor: Int32) throws {
+    guard shutdown(fileDescriptor, SHUT_WR) == 0 else {
+      throw posixError("copyIn: failed to finish data stream")
     }
   }
 
   static func receive(
     destination: URL,
     isArchive: Bool,
+    totalSize: UInt64,
     from connection: FileHandle,
     chunkSize: Int = defaultChunkSize
   ) async throws {
@@ -342,21 +379,33 @@ enum KrunCopyTransfer {
         from: connection.fileDescriptor,
         to: destinationFD,
         chunkSize: chunkSize,
-        operation: "copyOut"
+        operation: "copyOut",
+        byteCount: totalSize
       )
     }
   }
 
-  private static func copyBytes(
+  static func copyBytes(
     from sourceFD: Int32,
     to destinationFD: Int32,
     chunkSize: Int,
-    operation: String
+    operation: String,
+    byteCount: UInt64? = nil
   ) throws {
     var buffer = [UInt8](repeating: 0, count: chunkSize)
-    while true {
-      let count = read(sourceFD, &buffer, buffer.count)
-      if count == 0 { return }
+    var remaining = byteCount
+    while remaining.map({ $0 > 0 }) ?? true {
+      let readSize = remaining.map { Int(min(UInt64(buffer.count), $0)) } ?? buffer.count
+      let count = read(sourceFD, &buffer, readSize)
+      if count == 0 {
+        if let remaining {
+          throw ContainerizationError(
+            .internalError,
+            message: "\(operation): unexpected EOF with \(remaining) bytes remaining"
+          )
+        }
+        return
+      }
       guard count > 0 else {
         if errno == EINTR { continue }
         throw posixError("\(operation): read failed")
@@ -375,6 +424,9 @@ enum KrunCopyTransfer {
           throw ContainerizationError(.internalError, message: "\(operation): zero-byte write")
         }
         written += result
+      }
+      if let bytesRemaining = remaining {
+        remaining = bytesRemaining - UInt64(count)
       }
     }
   }

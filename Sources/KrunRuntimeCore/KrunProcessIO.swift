@@ -14,10 +14,16 @@ public actor KrunPortPool {
   }
 
   private let name: String
+  private let rotateReleased: Bool
   private var available: [Lease]
 
-  public init(entries: [KrunSocketLayout.IOEntry], name: String = "I/O") {
+  public init(
+    entries: [KrunSocketLayout.IOEntry],
+    name: String = "I/O",
+    rotateReleased: Bool = false
+  ) {
     self.name = name
+    self.rotateReleased = rotateReleased
     self.available = entries.map { Lease(port: $0.port, path: $0.path) }
   }
 
@@ -36,7 +42,9 @@ public actor KrunPortPool {
 
   public func put(_ leases: [Lease]) {
     available.append(contentsOf: leases)
-    available.sort { $0.port < $1.port }
+    if !rotateReleased {
+      available.sort { $0.port < $1.port }
+    }
   }
 }
 

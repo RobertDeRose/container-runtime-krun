@@ -5,18 +5,24 @@ RUNTIME="container-runtime-krun"
 IMAGE="alpine:3.20"
 INSTALL=0
 RESULT_ROOT="validation-results"
-ITERATIONS=4
+ITERATIONS=12
+COMMAND_TIMEOUT_SECONDS=180
+PREREQUISITE_TIMEOUT_SECONDS=600
+CLEANUP_TIMEOUT_SECONDS=30
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/validate_copy.sh [options]
 
-Validate v0.3 host/container file and directory copy over the krun vsock transport.
+Validate host/container file and directory copy through a selected runtime.
 
 Options:
   --install          Build/install the checkout and restart Apple Container first.
+  --runtime RUNTIME  Runtime to validate (default: container-runtime-krun).
   --image IMAGE      Test image (default: alpine:3.20).
-  --iterations N     Repeated copy round trips (default: 4).
+  --iterations N     Repeated copy round trips (default: 12).
+  --command-timeout N
+                     Liveness deadline per runtime command in seconds (default: 180).
   --result-root DIR  Output directory (default: validation-results).
   -h, --help         Show this help.
 USAGE
@@ -28,12 +34,20 @@ while (($#)); do
       INSTALL=1
       shift
       ;;
+    --runtime)
+      RUNTIME="${2:?missing value for --runtime}"
+      shift 2
+      ;;
     --image)
       IMAGE="${2:?missing value for --image}"
       shift 2
       ;;
     --iterations)
       ITERATIONS="${2:?missing value for --iterations}"
+      shift 2
+      ;;
+    --command-timeout)
+      COMMAND_TIMEOUT_SECONDS="${2:?missing value for --command-timeout}"
       shift 2
       ;;
     --result-root)
@@ -56,6 +70,10 @@ if ! [[ "$ITERATIONS" =~ ^[0-9]+$ ]] || ((ITERATIONS < 1)); then
   echo "--iterations must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || ((COMMAND_TIMEOUT_SECONDS < 1)); then
+  echo "--command-timeout must be a positive integer" >&2
+  exit 2
+fi
 
 for command in container python3 git make ps tar cmp; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -68,7 +86,8 @@ STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 PREFIX="krun-copy-${STAMP}-$$"
 CONTAINER_ID="$PREFIX-main"
 RESULT_DIR="$RESULT_ROOT/copy-${STAMP}-$$"
-ARCHIVE="$RESULT_ROOT/container-runtime-krun-copy-${STAMP}-$$.tar.gz"
+RUNTIME_SLUG="${RUNTIME//\//-}"
+ARCHIVE="$RESULT_ROOT/${RUNTIME_SLUG}-copy-${STAMP}-$$.tar.gz"
 FIXTURES="$RESULT_DIR/fixtures"
 OUTPUTS="$RESULT_DIR/outputs"
 mkdir -p "$FIXTURES/tree/sub" "$OUTPUTS"
@@ -89,37 +108,110 @@ fail() {
   FAILURES=$((FAILURES + 1))
 }
 
-run_capture() {
-  local name="$1"
-  local status
+run_bounded() {
+  local timeout_seconds="$1"
   shift
+  python3 - "$timeout_seconds" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout, *cmd = sys.argv[1:]
+proc = subprocess.Popen(cmd, start_new_session=True)
+
+def terminate_group():
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+try:
+    raise SystemExit(proc.wait(timeout=int(timeout)))
+except subprocess.TimeoutExpired:
+    print(f"command timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
+    terminate_group()
+    raise SystemExit(124)
+except KeyboardInterrupt:
+    terminate_group()
+    raise SystemExit(130)
+PY
+}
+
+run_capture_with_timeout() {
+  local name="$1"
+  local timeout_seconds="$2"
+  local status
+  shift 2
   {
     printf '$'
     printf ' %q' "$@"
     printf '\n'
-    "$@"
+    run_bounded "$timeout_seconds" "$@"
     status=$?
     printf '\nexit_status=%d\n' "$status"
   } >"$RESULT_DIR/$name.txt" 2>&1
   return "$status"
 }
 
+run_capture() {
+  local name="$1"
+  shift
+  run_capture_with_timeout "$name" "$COMMAND_TIMEOUT_SECONDS" "$@"
+}
+
 expect_success() {
   local name="$1"
+  local status
   shift
   if run_capture "$name" "$@"; then
     pass "$name"
   else
+    status=$?
     fail "$name"
+    if ((status == 124)); then
+      abort_timeout "$name"
+    fi
+  fi
+}
+
+
+expect_success_with_timeout() {
+  local name="$1"
+  local timeout_seconds="$2"
+  local status
+  shift 2
+  if run_capture_with_timeout "$name" "$timeout_seconds" "$@"; then
+    pass "$name"
+  else
+    status=$?
+    fail "$name"
+    if ((status == 124)); then
+      abort_timeout "$name"
+    fi
   fi
 }
 
 expect_failure() {
   local name="$1"
+  local status
   shift
   if run_capture "$name" "$@"; then
     fail "$name unexpectedly succeeded"
   else
+    status=$?
+    if ((status == 124)); then
+      fail "$name timed out"
+      abort_timeout "$name"
+    fi
     pass "$name rejected"
   fi
 }
@@ -127,9 +219,17 @@ expect_failure() {
 expect_failure_matching() {
   local name="$1"
   local pattern="$2"
+  local status
   shift 2
   if run_capture "$name" "$@"; then
     fail "$name unexpectedly succeeded"
+    return
+  else
+    status=$?
+  fi
+  if ((status == 124)); then
+    fail "$name timed out"
+    abort_timeout "$name"
   elif grep -Fq -- "$pattern" "$RESULT_DIR/$name.txt"; then
     pass "$name rejected as expected"
   else
@@ -167,7 +267,11 @@ wait_for_runtime_cleanup() {
   local timeout_seconds="${2:-15}"
   local deadline=$((SECONDS + timeout_seconds))
   while ((SECONDS < deadline)); do
-    if ! /bin/ps -axo command= | grep -F -- "$id" | grep -Eq 'container-runtime-krun|container-krun-vmm-helper'; then
+    if [[ "$RUNTIME" == "container-runtime-krun" ]]; then
+      if ! /bin/ps -axo command= | grep -F -- "$id" | grep -Eq 'container-runtime-krun|container-krun-vmm-helper'; then
+        return 0
+      fi
+    elif ! /bin/ps -axo command= | grep -F -- "$id" | grep -Fq -- "$RUNTIME"; then
       return 0
     fi
     sleep 0.25
@@ -183,16 +287,80 @@ list_krun_runtime_dirs() {
   done | sort
 }
 
+capture_diagnostics() {
+  local label="$1"
+  local status_file="$RESULT_DIR/system-status-$label.json"
+  local app_root log_root bundle_root path
+
+  run_bounded 15 container inspect "$CONTAINER_ID" >"$RESULT_DIR/container-inspect-$label.txt" 2>&1 || true
+  /bin/ps -axo pid=,ppid=,etime=,rss=,command= >"$RESULT_DIR/processes-$label.txt" 2>&1 || true
+  run_bounded 15 container system status --format json >"$status_file" 2>&1 || true
+  run_bounded 15 container system logs --debug --last 10m >"$RESULT_DIR/system-logs-$label.txt" 2>&1 || true
+
+  app_root="$(python3 - "$status_file" <<'PY'
+import json,sys
+try:
+    data=json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    print('')
+else:
+    print(data.get('appRoot') or (data.get('paths') or {}).get('appRoot') or '')
+PY
+)"
+  log_root="$(python3 - "$status_file" <<'PY'
+import json,sys
+try:
+    data=json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    print('')
+else:
+    print(data.get('logRoot') or (data.get('paths') or {}).get('logRoot') or '')
+PY
+)"
+
+  if [[ -n "$app_root" ]]; then
+    bundle_root="$app_root/containers/$CONTAINER_ID"
+    for path in "$bundle_root"/krun-vmm.log "$bundle_root"/vminitd.log \
+      "$bundle_root"/container.log "$bundle_root"/krun-vmm.json; do
+      [[ -r "$path" ]] || continue
+      cp "$path" "$RESULT_DIR/$label-$(basename "$path")"
+    done
+  fi
+  if [[ -n "$log_root" && -r "$log_root/$RUNTIME-$CONTAINER_ID.log" ]]; then
+    cp "$log_root/$RUNTIME-$CONTAINER_ID.log" "$RESULT_DIR/runtime-plugin-$label.log"
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -U >"$RESULT_DIR/unix-sockets-$label.txt" 2>&1 || true
+  fi
+}
+
+abort_timeout() {
+  local name="$1"
+  log "$name timed out; collecting live copy diagnostics"
+  capture_diagnostics "$name-timeout"
+  finish_validation
+  exit 1
+}
+
 finish_validation() {
-  container list --all >"$RESULT_DIR/container-list-final.txt" 2>&1 || true
-  /bin/ps -axo pid=,ppid=,etime=,rss=,command= \
-    | grep -E 'container-runtime-krun|container-krun-vmm-helper' \
-    | grep -v grep >"$RESULT_DIR/runtime-processes-final.txt" || true
+  run_bounded 15 container list --all >"$RESULT_DIR/container-list-final.txt" 2>&1 || true
+  if [[ "$RUNTIME" == "container-runtime-krun" ]]; then
+    /bin/ps -axo pid=,ppid=,etime=,rss=,command= \
+      | grep -E 'container-runtime-krun|container-krun-vmm-helper' \
+      | grep -v grep >"$RESULT_DIR/runtime-processes-final.txt" || true
+  else
+    /bin/ps -axo pid=,ppid=,etime=,rss=,command= \
+      | grep -F -- "$RUNTIME" \
+      | grep -v grep >"$RESULT_DIR/runtime-processes-final.txt" || true
+  fi
 
   {
     echo "runtime=$RUNTIME"
     echo "image=$IMAGE"
     echo "iterations=$ITERATIONS"
+    echo "command_timeout_seconds=$COMMAND_TIMEOUT_SECONDS"
+    echo "prerequisite_timeout_seconds=$PREREQUISITE_TIMEOUT_SECONDS"
     echo "failures=$FAILURES"
     echo "git_head=$(git rev-parse HEAD 2>/dev/null || true)"
   } >"$RESULT_DIR/SUMMARY.txt"
@@ -205,12 +373,21 @@ finish_validation() {
 cleanup() {
   set +e
   if ((CONTAINER_CREATED)); then
-    container delete --force "$CONTAINER_ID" >/dev/null 2>&1 || true
+    run_bounded "$CLEANUP_TIMEOUT_SECONDS" container delete --force "$CONTAINER_ID" >/dev/null 2>&1 || true
   fi
 }
+interrupt() {
+  local status="$1"
+  trap - EXIT INT TERM
+  log "interrupted; collecting diagnostics and preserving partial results"
+  capture_diagnostics interrupt
+  finish_validation
+  cleanup
+  exit "$status"
+}
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+trap 'interrupt 130' INT
+trap 'interrupt 143' TERM
 
 printf 'host-file-payload\n' >"$FIXTURES/host-file.txt"
 printf 'tree-root\n' >"$FIXTURES/tree/root.txt"
@@ -223,14 +400,16 @@ block = bytes(range(256))
 path.write_bytes(block * 4096)
 PY
 
-list_krun_runtime_dirs >"$RESULT_DIR/initial-runtime-dirs.txt"
+if [[ "$RUNTIME" == "container-runtime-krun" ]]; then
+  list_krun_runtime_dirs >"$RESULT_DIR/initial-runtime-dirs.txt"
+fi
 
 if ((INSTALL)); then
   log "building and installing current checkout"
-  expect_success make_doctor make doctor
-  expect_success make_check make check
-  expect_success make_test make test
-  expect_success make_install make install
+  expect_success_with_timeout make_doctor "$PREREQUISITE_TIMEOUT_SECONDS" make doctor
+  expect_success_with_timeout make_check "$PREREQUISITE_TIMEOUT_SECONDS" make check
+  expect_success_with_timeout make_test "$PREREQUISITE_TIMEOUT_SECONDS" make test
+  expect_success_with_timeout make_install "$PREREQUISITE_TIMEOUT_SECONDS" make install
   if ((FAILURES > 0)); then
     log "build/install prerequisites failed; skipping runtime copy checks"
     finish_validation
@@ -310,15 +489,25 @@ else
   fail "copyOut directory tree"
 fi
 
-# Exercise transfer-slot reuse with a binary round trip.
+# Exercise transfer-slot reuse beyond one full copy-port-pool cycle.
 for ((i = 1; i <= ITERATIONS; i++)); do
   guest_path="/copy/blob-$i.bin"
   host_path="$OUTPUTS/blob-$i.bin"
-  if container copy "$FIXTURES/blob.bin" "$CONTAINER_ID:$guest_path" \
-    >"$RESULT_DIR/roundtrip-$i-in.txt" 2>&1 \
-    && container copy "$CONTAINER_ID:$guest_path" "$host_path" \
-      >"$RESULT_DIR/roundtrip-$i-out.txt" 2>&1 \
-    && cmp -s "$FIXTURES/blob.bin" "$host_path"; then
+  in_status=0
+  out_status=0
+  run_capture "roundtrip-$i-in" container copy "$FIXTURES/blob.bin" "$CONTAINER_ID:$guest_path" || in_status=$?
+  if ((in_status == 124)); then
+    fail "copy round trip $i input timed out"
+    abort_timeout "roundtrip-$i-in"
+  fi
+  if ((in_status == 0)); then
+    run_capture "roundtrip-$i-out" container copy "$CONTAINER_ID:$guest_path" "$host_path" || out_status=$?
+    if ((out_status == 124)); then
+      fail "copy round trip $i output timed out"
+      abort_timeout "roundtrip-$i-out"
+    fi
+  fi
+  if ((in_status == 0 && out_status == 0)) && cmp -s "$FIXTURES/blob.bin" "$host_path"; then
     pass "copy round trip $i"
   else
     fail "copy round trip $i"
@@ -330,7 +519,7 @@ CONCURRENT_FAILURES=0
 PIDS=()
 for i in 1 2 3 4; do
   (
-    container copy "$FIXTURES/blob.bin" "$CONTAINER_ID:/copy/concurrent-$i.bin" \
+    run_bounded "$COMMAND_TIMEOUT_SECONDS" container copy "$FIXTURES/blob.bin" "$CONTAINER_ID:/copy/concurrent-$i.bin" \
       >"$RESULT_DIR/concurrent-$i.txt" 2>&1
   ) &
   PIDS+=("$!")
@@ -372,13 +561,15 @@ else
   fail "runtime or VMM helper remained after delete"
 fi
 
-list_krun_runtime_dirs >"$RESULT_DIR/final-runtime-dirs.txt"
-comm -13 "$RESULT_DIR/initial-runtime-dirs.txt" "$RESULT_DIR/final-runtime-dirs.txt" \
-  >"$RESULT_DIR/new-runtime-dirs.txt"
-if [[ ! -s "$RESULT_DIR/new-runtime-dirs.txt" ]]; then
-  pass "copy validation left no new krun socket directories"
-else
-  fail "copy validation left new krun socket directories"
+if [[ "$RUNTIME" == "container-runtime-krun" ]]; then
+  list_krun_runtime_dirs >"$RESULT_DIR/final-runtime-dirs.txt"
+  comm -13 "$RESULT_DIR/initial-runtime-dirs.txt" "$RESULT_DIR/final-runtime-dirs.txt" \
+    >"$RESULT_DIR/new-runtime-dirs.txt"
+  if [[ ! -s "$RESULT_DIR/new-runtime-dirs.txt" ]]; then
+    pass "copy validation left no new krun socket directories"
+  else
+    fail "copy validation left new krun socket directories"
+  fi
 fi
 
 finish_validation
