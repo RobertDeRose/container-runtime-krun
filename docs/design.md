@@ -95,7 +95,7 @@ Apple's stock runtime also invokes its package-scoped `LocalNetworkPrivacy` help
 
 ## Process lifecycle
 
-The runtime constructs OCI specs directly because `LinuxProcessConfiguration.toOCI()` is package-scoped in Containerization 0.43.0.
+The runtime constructs OCI specs directly because `LinuxProcessConfiguration.toOCI()` is package-scoped in Containerization 0.42.0.
 
 The generated spec preserves the stock runtime's important baseline:
 
@@ -161,7 +161,7 @@ The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO
 
 ## Current deferred surface
 
-Multiple network attachments, host directory/virtio-fs mounts, arbitrary `dial`, snapshots, trim, Rosetta, and nested virtualization remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. v0.4 enables `--init`, published Unix sockets, and SSH agent forwarding in independent parity slices.
+Host directory/virtio-fs mounts, arbitrary `dial`, Rosetta, the `reserved` vmnet variant, nested virtualization, and `clean`/trim remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. v0.4 enables `--init`, published Unix sockets, and SSH agent forwarding. v0.5 adds live rootfs snapshot/export and multiple allocation-only network attachments.
 
 Rosetta is intentionally not part of the active parity roadmap. Its integration is specific to Apple's Virtualization.framework-backed runtime, and users requiring x86_64 emulation should use Apple's official runtime.
 
@@ -169,7 +169,7 @@ Rosetta is intentionally not part of the active parity roadmap. Its integration 
 
 ### v0.2 follow-ups
 
-Validate outbound connectivity, DNS, network statistics, repeated cleanup, and published TCP/UDP forwarding on the allocation-only path. Once those gates pass, the one-attachment v0.2 networking scope is complete. Multiple attachments should be added only if a concrete use case justifies them. Supporting Apple's `reserved` variant would require a network-plugin-side integration or an upstream capability rather than another runtime-side vmnet bridge.
+Validate outbound connectivity, DNS, network statistics, repeated cleanup, and published TCP/UDP forwarding on the allocation-only path. Supporting Apple's `reserved` variant would require a network-plugin-side integration or an upstream capability rather than another runtime-side vmnet bridge.
 
 ### v0.3: host integration
 
@@ -183,12 +183,22 @@ Host directory mounts are a separate future slice using virtio-fs. They require 
 
 Published Unix sockets use one fixed host-listening libkrun mapping per configured socket plus vminitd's existing `.outOf` relay. SSH forwarding uses the same mechanism in reverse: vminitd creates a short guest staging socket, libkrun maps guest vsock connections to the host `SSH_AUTH_SOCK`, and the staging socket is bind-mounted at `/var/host-services/ssh-auth.sock` in the container. Apple remains authoritative for both configuration surfaces; the runtime adds no relay registry or persistent state. Arbitrary runtime `dial(port)` remains the final host-integration slice because it requires a dynamic host-to-guest vsock connection after the VM has already started. If stable libkrun cannot provide that operation, prefer a small generic libkrun API addition over an Apple-specific Containerization protocol.
 
-### v0.4: parity and benchmarks
+### v0.4: process and socket parity
 
-Add selected parity features in independent slices: `--init`, published Unix sockets and SSH forwarding, running-container snapshot/export, and nested virtualization where libkrun and the host support it. Publish repeatable comparisons against `container-runtime-linux`: boot latency, idle RSS, memory returned after workload release, pressure behavior, CPU overhead, and compatibility coverage.
+v0.4 adds `--init`, published Unix sockets, and SSH agent forwarding in independent slices.
 
 The `--init` slice mirrors Apple Containerization's existing behavior without introducing another init implementation: the guest `/sbin/vminitd` binary is bind-mounted read-only at `/.cz-init`, and only the container's initial OCI process is rewritten to `/.cz-init -- <workload>`. `container exec` processes remain direct exec processes.
 
 The Unix-socket slice predeclares relay mappings before VM start because stable libkrun cannot add them dynamically. Published sockets are resolved through the same container-to-guest path mapping used by copy operations, including volume-backed paths. SSH forwarding preserves Apple's guest path and environment behavior while staging the guest listener at a short VM-global path to stay within Unix socket path limits. Published host paths are owned by the runtime and removed after helper termination and bootstrap rollback.
 
-Rosetta is deliberately excluded from v0.4 and from the active roadmap. If x86_64 emulation is required, use Apple's official runtime.
+Rosetta is deliberately excluded from the active roadmap. If x86_64 emulation is required, use Apple's official runtime.
+
+### v0.5: storage lifecycle, multiple networks, and measurement
+
+Live export follows Apple's Container 1.3.1 runtime contract. Containerization 0.42 translates the container-relative `/` freeze request to the mounted guest rootfs path before calling vminitd; this runtime talks to vminitd directly, so it freezes that same mounted rootfs path explicitly, copies the root ext4 image on the host, and thaws on both success and copy failure. `FIFREEZE` synchronizes the target filesystem before returning, so no additional guest protocol or global `sync` is required. Booted-but-not-started containers can be copied without a freeze. Attached volumes remain separate and are not folded into the exported root filesystem image.
+
+Filesystem trim remains deferred. Container 1.3.1 does not define the later runtime `clean` route or expose a `container clean` CLI, leaving no supported end-to-end surface for validating the behavior. Revisit trim when the host Container release exposes that command.
+
+Multiple `allocationOnly` network attachments reuse the existing array-based allocation and helper path. Each Apple allocation gets one `vmnet-helper` backend and one libkrun NIC, appearing in guest order as `eth0`, `eth1`, and so on. Only `eth0` installs the default route and supplies fallback DNS/hostname identity; published ports continue to use the first attachment. Cleanup closes every backend and Apple network session.
+
+The v0.5 benchmark harness is observational rather than a CI performance gate. It retains raw samples and summary statistics for startup, exec, CPU, copy, volume I/O, stop/delete latency, idle process footprint, and the established guest-memory release workload under both `container-runtime-linux` and `container-runtime-krun`.

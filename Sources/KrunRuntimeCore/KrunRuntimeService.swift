@@ -9,9 +9,6 @@ import Logging
 import NIOCore
 import SocketForwarder
 
-#if canImport(Darwin)
-  import Darwin
-#endif
 
 public actor KrunRuntimeService {
   public enum State: Sendable, Equatable {
@@ -475,11 +472,64 @@ public actor KrunRuntimeService {
     return message.reply()
   }
 
-  @Sendable public func snapshotDisk(_ message: XPCMessage) async throws -> XPCMessage {
-    throw unsupported("snapshotDisk")
-  }
-  @Sendable public func clean(_ message: XPCMessage) async throws -> XPCMessage {
-    throw unsupported("clean")
+  @Sendable
+  public func snapshotDisk(_ message: XPCMessage) async throws -> XPCMessage {
+    guard state == .running || state == .booted else {
+      throw ContainerizationError(
+        .invalidState,
+        message: "cannot snapshot disk: container is not running or booted"
+      )
+    }
+    guard let controller = vm else {
+      throw ContainerizationError(.invalidState, message: "runtime is not booted")
+    }
+    guard let imagePath = message.string(key: RuntimeKeys.imagePath.rawValue) else {
+      throw ContainerizationError(
+        .invalidArgument,
+        message: "no image path supplied for snapshotDisk"
+      )
+    }
+    guard let destinationPath = message.string(key: RuntimeKeys.destinationPath.rawValue) else {
+      throw ContainerizationError(
+        .invalidArgument,
+        message: "no destination path supplied for snapshotDisk"
+      )
+    }
+
+    let shouldFreeze = state == .running
+    if shouldFreeze {
+      try await controller.agent.filesystemOperation(
+        operation: .freeze,
+        path: controller.rootPath
+      )
+    }
+
+    do {
+      try FileManager.default.copyItem(atPath: imagePath, toPath: destinationPath)
+    } catch {
+      if shouldFreeze {
+        do {
+          try await controller.agent.filesystemOperation(
+            operation: .thaw,
+            path: controller.rootPath
+          )
+        } catch {
+          log.error(
+            "failed to thaw filesystem after snapshotDisk error",
+            metadata: ["error": "\(error)"]
+          )
+        }
+      }
+      throw error
+    }
+
+    if shouldFreeze {
+      try await controller.agent.filesystemOperation(
+        operation: .thaw,
+        path: controller.rootPath
+      )
+    }
+    return message.reply()
   }
 
   private func unsupported(_ route: String) -> ContainerizationError {

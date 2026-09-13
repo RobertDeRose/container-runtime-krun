@@ -124,12 +124,11 @@ The runtime uses Apple Container's public `SocketForwarder` implementation and t
 
 Verify each remaining unsupported feature produces an explicit error before VM startup where possible:
 
-- request more than one network attachment;
 - add a host bind/virtio-fs mount;
 - request Rosetta;
 - request nested virtualization.
 
-Runtime-only unsupported routes (`dial`, snapshot, clean) must also return `unsupported` rather than hanging or silently succeeding. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, and SSH forwarding are covered by dedicated gates instead.
+The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.3.1 has no public CLI surface for `dial`, and its runtime SDK does not define the later `clean` route, so this plugin does not register `clean`. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, SSH forwarding, snapshot/export, and multiple networks are covered by dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 
@@ -173,4 +172,34 @@ scripts/validate_unix_sockets.sh --install
 
 The validator publishes a workload-owned Unix socket to the host, exercises repeated and concurrent host clients, and verifies that the host listener is removed during normal cleanup. It repeats publication for a socket stored on an Apple block-backed volume so container-path resolution is checked against mount shadowing.
 
-SSH forwarding is validated with a host-side fake agent socket: both the initial process and `container exec` must receive `SSH_AUTH_SOCK=/var/host-services/ssh-auth.sock`, relay bidirectional bytes to the host socket, and preserve the source socket permissions on the guest staging socket. A run with no host `SSH_AUTH_SOCK` verifies Apple's permissive behavior: the guest environment variable remains present, but no socket is mounted. Finally, an intentionally invalid sysctl forces bootstrap rollback after libkrun starts and proves that the owned published host socket and helper process are cleaned up.
+SSH forwarding is validated with a host-side fake agent socket: both the initial process and `container exec` must receive `SSH_AUTH_SOCK=/var/host-services/ssh-auth.sock`, relay bidirectional bytes to the host socket, and preserve the source socket permissions on the guest staging socket. A run with no host `SSH_AUTH_SOCK` verifies Apple's permissive behavior: the guest environment variable remains present, but no socket is mounted. Finally, a deliberate published-TCP bind collision forces bootstrap rollback after libkrun and the Unix relay are live and proves that the owned published host socket and helper process are cleaned up.
+
+## Gate 13: v0.5 running-container snapshot/export
+
+Validate live rootfs export with:
+
+```bash
+scripts/validate_snapshot.sh --install
+```
+
+The validator starts a running container, writes data into the root filesystem, exports through Apple Container's public `container export` command, and verifies the resulting tar archive contains the pre-export data. It then writes additional data without an explicit workload-side `sync` and performs a second export; that second archive must contain the new write, proving the runtime freezes the mounted rootfs and captures a fresh image while the workload remains writable after thaw. A caller-side output failure is followed by another exec health check. Attached volumes are intentionally outside this rootfs export contract.
+
+## Gate 14: v0.5 multiple allocation-only networks
+
+Validate two attachments with:
+
+```bash
+scripts/validate_multiple_networks.sh --install
+```
+
+The validator creates two temporary Apple `allocationOnly` networks, attaches one container to both in request order, and verifies `eth0`/`eth1` address placement, one default route through `eth0`, a connected route on `eth1`, outbound connectivity, published TCP forwarding through the primary attachment, Apple allocation release, and helper cleanup. Override the temporary CIDRs if they overlap local networks.
+
+## Gate 15: v0.5 runtime comparison benchmark
+
+Collect non-gating comparison data with:
+
+```bash
+scripts/benchmark_runtimes.sh --install-krun --iterations 5
+```
+
+The harness compares `container-runtime-linux` and `container-runtime-krun` with a warmed image and networking disabled for the repeated microbenchmarks. Raw TSV samples and a summary table cover startup, exec, deterministic CPU work, copy in/out, volume writes, stop/delete latency, and host process footprint. It also repeats the established 1 GiB guest-memory release workload and records host memory/process observations without imposing a fixed RSS-reclamation threshold.

@@ -2,7 +2,6 @@
 set -uo pipefail
 
 RUNTIME="container-runtime-krun"
-NETWORK="krun"
 IMAGE="alpine:3.20"
 INSTALL=0
 RESULT_ROOT="validation-results"
@@ -19,9 +18,6 @@ VM startup. Runtime-only routes are exercised against one live krun container.
 
 Options:
   --install          Build/install the checkout and restart Apple Container.
-  --network NAME     Existing Apple network used for the multi-attachment test
-                     (default: krun). The same network is supplied twice; no
-                     second network is created.
   --image IMAGE      Test image (default: alpine:3.20).
   --result-root DIR  Output directory (default: validation-results).
   --timeout SECONDS  Per-operation timeout (default: 60).
@@ -31,9 +27,6 @@ Options:
                       general-purpose dial CLI command.
   -h, --help         Show this help.
 
-`container clean` is exercised when the installed Container CLI exposes that
-command. Container 1.3.1 does not; in that environment the clean route is
-reported as SKIP rather than treated as a runtime failure.
 USAGE
 }
 
@@ -42,10 +35,6 @@ while (($#)); do
     --install)
       INSTALL=1
       shift
-      ;;
-    --network)
-      NETWORK="${2:?missing value for --network}"
-      shift 2
       ;;
     --image)
       IMAGE="${2:?missing value for --image}"
@@ -360,7 +349,7 @@ check_no_new_sockets() {
 }
 
 log "Gate 8 fail-closed validation"
-log "runtime=$RUNTIME network=$NETWORK image=$IMAGE"
+log "runtime=$RUNTIME image=$IMAGE"
 
 {
   echo "timestamp=$(date '+%Y-%m-%dT%H:%M:%S%z')"
@@ -384,24 +373,12 @@ if ((INSTALL)); then
   expect_success system_start container system start
 fi
 
-if container network inspect "$NETWORK" >"$RESULT_DIR/network-inspect.txt" 2>&1; then
-  pass "network $NETWORK is available for the multi-attachment rejection"
-else
-  fail "network $NETWORK is available for the multi-attachment rejection"
-fi
-
 HOST_MOUNT_DIR_ABS="$(absolute_path "$HOST_MOUNT_DIR")"
 NO_NETWORK_PORT="$(free_tcp_port)"
 
 # Configuration-time feature gates. Every command must fail with the runtime's
 # explicit unsupported message. The post-run system-log check additionally
 # verifies that no vmnet/libkrun/guest setup lifecycle event was reached.
-run_feature_gate_case \
-  multi-network \
-  "multiple network attachments" \
-  --network "$NETWORK" --network "$NETWORK" \
-  "$IMAGE" true
-
 run_feature_gate_case \
   host-mount \
   "host, block, and virtiofs mounts" \
@@ -458,24 +435,6 @@ else
 fi
 container inspect "$ROUTE_ID" >"$RESULT_DIR/route-container-inspect.txt" 2>&1 || true
 capture_runtime_state "$RESULT_DIR/runtime-state-routes-live.txt"
-
-expect_unsupported \
-  route-snapshot \
-  "container-runtime-krun does not support runtime route snapshotDisk" \
-  container export --output "$RESULT_DIR/runtime-export.tar" "$ROUTE_ID"
-
-# `container clean` was added after Container 1.3.1. Exercise the runtime
-# route when the installed CLI exposes it; otherwise record the control-plane
-# limitation as a skip instead of misclassifying plugin lookup failure as a
-# krun failure.
-if container clean --help >"$RESULT_DIR/route-clean-availability.txt" 2>&1; then
-  expect_unsupported \
-    route-clean \
-    "container-runtime-krun does not support runtime route clean" \
-    container clean "$ROUTE_ID"
-else
-  skip "route-clean not behaviorally reachable: installed Container CLI does not expose the clean command"
-fi
 
 # Container 1.3.1 has no general-purpose CLI command for ContainerClient.dial.
 # An externally supplied validation helper may exercise it without forcing this
@@ -544,10 +503,9 @@ grep -E "$PREFIX|container-runtime-krun does not support" \
 
 {
   echo "runtime=$RUNTIME"
-  echo "network=$NETWORK"
   echo "image=$IMAGE"
   echo "feature_gate_cases=${#CONFIG_IDS[@]}"
-  echo "runtime_route_cases=3"
+  echo "runtime_route_cases=1"
   echo "passes=$PASSES"
   echo "skips=$SKIPS"
   echo "failures=$FAILURES"
@@ -555,11 +513,6 @@ grep -E "$PREFIX|container-runtime-krun does not support" \
     echo "dial_validation=external helper: $DIAL_HELPER"
   else
     echo "dial_validation=skipped: no public Container 1.3.1 dial CLI"
-  fi
-  if container clean --help >/dev/null 2>&1; then
-    echo "clean_validation=public CLI"
-  else
-    echo "clean_validation=skipped: clean command unavailable in installed CLI"
   fi
 } >"$RESULT_DIR/SUMMARY.txt"
 

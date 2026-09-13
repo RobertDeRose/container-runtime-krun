@@ -8,7 +8,7 @@ No changes to `apple/container` or `apple/containerization` are required. The pl
 
 ## Current scope
 
-v0.3.0 establishes the lifecycle, networking, copy, and block-backed volume baseline. Development on v0.4 adds selected runtime-parity features in independent slices:
+v0.4.0 establishes the lifecycle, networking, host-integration, and selected parity baseline. Development on v0.5 adds live rootfs export, multiple network attachments, and repeatable runtime comparisons:
 
 | Capability | Current |
 | --- | --- |
@@ -20,14 +20,15 @@ v0.3.0 establishes the lifecycle, networking, copy, and block-backed volume base
 | signal / stop / wait | yes |
 | container statistics | yes |
 | automatic free-page reporting | yes, provided by libkrun + Apple kernel |
-| Networking | yes, one Apple `container-network-vmnet` `allocationOnly` attachment |
+| Networking | yes, multiple Apple `container-network-vmnet` `allocationOnly` attachments |
 | Published TCP/UDP ports | yes, through Apple `SocketForwarder` on the first attachment |
 | Apple named/anonymous volumes | yes, libkrun virtio-blk |
 | Host bind/virtiofs mounts | no |
 | Published Unix sockets | yes, fixed libkrun vsock mappings + vminitd relay |
 | Arbitrary runtime `dial(port)` | no |
 | `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
-| Disk snapshot / trim | no |
+| Disk snapshot / export | yes, live rootfs export |
+| Filesystem trim / `container clean` | no, deferred until the installed Container CLI exposes the command |
 | Rosetta | no, intentionally deferred; use Apple's official runtime for x86_64 emulation |
 | Nested virtualization | no |
 | SSH agent forwarding | yes, reverse fixed-vsock relay from host `SSH_AUTH_SOCK` |
@@ -40,8 +41,8 @@ v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` 
 ## Prerequisites
 
 - Apple Silicon Mac
-- Apple Container source/API compatible with commit `eee7ad097079cc3b02d5309ec10160143f2d0c6a`
-- Containerization `0.43.0`
+- Apple Container 1.3.1 / commit `a9a62e28f6beb88940122a3d7b286f2d5ae8053a`
+- Containerization `0.42.0`
 - Swift 6.2+
 - libkrun 1.19.4
 - `vmnet-helper` when using networking
@@ -111,7 +112,7 @@ container run --rm \
   alpine:3.20 sh -c 'echo pid=$$; sleep 1'
 ```
 
-For networking, create a non-overlapping `allocationOnly` network once and select it explicitly:
+For networking, create non-overlapping `allocationOnly` networks and select one or more explicitly:
 
 ```bash
 container network create \
@@ -123,6 +124,13 @@ container run --rm \
   --runtime container-runtime-krun \
   --network krun \
   alpine:3.20 ping -c 1 1.1.1.1
+
+# Additional allocationOnly networks become eth1, eth2, ...; eth0 remains primary.
+container run --rm \
+  --runtime container-runtime-krun \
+  --network krun \
+  --network krun-secondary \
+  alpine:3.20 ip route
 ```
 
 TCP and UDP ports can be published through the same Apple `SocketForwarder` implementation used by the stock runtime:
@@ -185,7 +193,7 @@ libkrun's vsock mappings are configured before VM start. The runtime currently r
 
 The stdio pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
 
-For the first v0.2 networking slice, Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through an external `vmnet-helper` packet backend. The Apple-assigned address, gateway, DNS, hosts entry, and MTU are configured in the guest with vminitd. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`. Published TCP/UDP ports reuse Apple Container's `SocketForwarder` implementation and target the Apple-assigned address on the first attachment. Multiple attachments remain intentionally unsupported.
+Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through one external `vmnet-helper` packet backend per attachment. The Apple-assigned address and MTU are configured on `eth0`, `eth1`, ... in request order. `eth0` remains authoritative for the default route, fallback DNS, hostname identity, and published TCP/UDP forwarding. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`.
 
 See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
@@ -193,4 +201,4 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
 
-v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4 parity development has validated `--init`; the current slice adds published Unix sockets and SSH agent forwarding over fixed pre-boot libkrun vsock mappings and vminitd's existing relay RPCs. Run `scripts/validate_init.sh --install` and `scripts/validate_unix_sockets.sh --install` for the corresponding macOS behavioral gates.
+v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. v0.5 development adds live rootfs snapshot/export, multiple allocation-only attachments, and a non-gating comparison harness against Apple's default runtime. `container clean` remains deferred because Container 1.3.1 does not expose the public command needed to validate it. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.
