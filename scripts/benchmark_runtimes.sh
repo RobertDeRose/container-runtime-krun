@@ -43,7 +43,7 @@ while (($#)); do
 done
 [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || { echo "--iterations must be positive" >&2; exit 2; }
 [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "--command-timeout must be positive" >&2; exit 2; }
-for c in container python3 git make ps dd; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
+for c in container python3 git mise ps dd; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
 
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 PREFIX="kb-${STAMP}-$$"
@@ -194,10 +194,10 @@ PY
 } >"$OUT/environment.txt"
 
 if ((INSTALL_KRUN)); then
-  run_required make-doctor make doctor
-  run_required make-check make check
-  run_required make-test make test
-  run_required make-install make install
+  run_required mise-doctor mise run doctor
+  run_required mise-check mise run check
+  run_required mise-test mise run test
+  run_required mise-install mise run install
   run_required system-stop container system stop
   run_required system-start container system start
 fi

@@ -43,17 +43,25 @@ v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` 
 - Apple Silicon Mac
 - Apple Container 1.3.1 / commit `a9a62e28f6beb88940122a3d7b286f2d5ae8053a`
 - Containerization `0.42.0`
-- Swift 6.2+
-- libkrun 1.19.4
+- mise 2026.9.3+
+- Swift 6.2+ from Xcode
+- Homebrew `llvm`, `lld`, and `xz` as libkrun build dependencies
 - `vmnet-helper` when using networking
-- the libkrun Homebrew tap's matching `virglrenderer` (`0.10.4e`), not Homebrew core's newer incompatible ABI
 
-Recommended libkrun and networking installation:
+The release build fetches and builds the exact libkrun source used by this runtime:
+
+```text
+repository=https://github.com/RobertDeRose/libkrun
+commit=d37b5c0f72998df5cddd79ae71af4d0006f5f543
+version=1.19.4
+```
+
+The fetch transport can be overridden without changing the pinned source commit, for example `LIBKRUN_REPO=git@github.com:RobertDeRose/libkrun.git mise run libkrun`.
+
+No Homebrew or system libkrun installation is used at runtime. Install the build and networking dependencies with:
 
 ```bash
-brew tap libkrun/krun
-brew install libkrun/krun/virglrenderer
-brew install libkrun/krun/libkrun
+brew install llvm lld xz
 brew tap nirs/vmnet-helper
 brew trust nirs/vmnet-helper
 brew install vmnet-helper
@@ -62,14 +70,15 @@ brew install vmnet-helper
 ## Build and install
 
 ```bash
-make release
-make install
+mise install
+mise run release
+mise run install
 ```
 
-`make install` derives the Apple Container installation root from the resolved `container` executable. Override it when necessary:
+`mise run install` derives the Apple Container installation root from the resolved `container` executable. mise pins Rust 1.98.1 for the libkrun build. Override the installation root when necessary:
 
 ```bash
-make install INSTALL_ROOT=/path/to/container/install/root
+INSTALL_ROOT=/path/to/container/install/root mise run install
 ```
 
 The installed layout is:
@@ -77,12 +86,16 @@ The installed layout is:
 ```text
 $INSTALL_ROOT/libexec/container-plugins/container-runtime-krun/
 ├── config.toml
-└── bin/
-    ├── container-runtime-krun
-    └── container-krun-vmm-helper
+├── bin/
+│   ├── container-runtime-krun
+│   └── container-krun-vmm-helper
+├── lib/
+│   ├── libkrun.dylib
+│   └── libkrun.provenance
+└── share/licenses/libkrun/LICENSE
 ```
 
-The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not need that entitlement because libkrun is isolated in the helper process.
+The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not need that entitlement because libkrun is isolated in the helper process. The runtime resolves the packaged `lib/libkrun.dylib` by default. `LIBKRUN_DYLIB` remains available as an explicit development/test override.
 
 Restart the Apple Container system after installing so the API server rescans runtime plugins:
 

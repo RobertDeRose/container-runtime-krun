@@ -5,7 +5,7 @@ import Testing
 
 @Test func configurationRoundTrips() throws {
   let original = KrunVMMConfig(
-    libkrun: "/opt/homebrew/lib/libkrun.dylib",
+    libkrun: "/opt/container/libexec/container-plugins/container-runtime-krun/lib/libkrun.dylib",
     kernel: "/tmp/kernel",
     initDisk: "/tmp/init.ext4",
     rootDisk: "/tmp/root.ext4",
@@ -48,4 +48,14 @@ import Testing
 @Test func defaultsReserveControlAndStdioSeparately() {
   #expect(KrunDefaults.controlPort < KrunDefaults.firstIOPort)
   #expect(KrunDefaults.ioPortCount >= 3)
+}
+
+@Test func bundledLibkrunPathIsRelativeToPluginExecutable() {
+  let executable = URL(
+    fileURLWithPath: "/opt/container/libexec/container-plugins/container-runtime-krun/bin/container-runtime-krun"
+  )
+  #expect(
+    KrunDefaults.bundledLibkrunPath(executableURL: executable)
+      == "/opt/container/libexec/container-plugins/container-runtime-krun/lib/libkrun.dylib"
+  )
 }

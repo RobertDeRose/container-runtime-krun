@@ -5,9 +5,10 @@ v0.1 validated the standalone runtime lifecycle and memory reclamation. v0.2 kee
 ## Gate 1: installation and discovery
 
 ```bash
-make doctor
-make release
-make install
+mise install
+mise run doctor
+mise run release
+mise run install
 container system stop
 container system start
 ```
@@ -40,7 +41,7 @@ Choose another private subnet if that range overlaps an existing network. Then r
 scripts/validate_networking.sh --install
 ```
 
-`--install` builds and installs the current checkout, restarts Apple Container, and runs `make doctor`, `make check`, and `make test`. The guest probe validates the interface, route, gateway, outbound IPv4 connectivity, resolver configuration, and DNS resolution. After that run is cleaned up, the collector performs one `--network none` baseline boot so network-specific startup cost can be separated from libkrun/vminitd startup cost.
+`--install` builds and installs the current checkout, restarts Apple Container, and runs `mise run doctor`, `mise run check`, and `mise run test`. The guest probe validates the interface, route, gateway, outbound IPv4 connectivity, resolver configuration, and DNS resolution. After that run is cleaned up, the collector performs one `--network none` baseline boot so network-specific startup cost can be separated from libkrun/vminitd startup cost.
 
 The script preserves each stopped container long enough to collect the guest boot and libkrun logs before explicitly deleting it. It also samples helper processes and Unix sockets while the networked container is alive and records cleanup state. Results are written under `validation-results/` and packaged as a single `container-runtime-krun-networking-*.tar.gz` archive.
 
@@ -58,7 +59,7 @@ The important diagnostics are:
 - `runtime-state-live.txt`: runtime/helper/socket samples during the run;
 - `runtime-state-after-delete.txt`: networked-run cleanup state;
 - `runtime-state-final.txt`: final cleanup state after the no-network baseline;
-- `make_check.txt` and `make_test.txt`: repository validation output.
+- `mise_check.txt` and `mise_test.txt`: repository validation output.
 
 Do not reduce readiness timeouts based only on total command duration. Use `lifecycle.txt` to identify the adjacent lifecycle events containing the delay. In particular, a long `vmnet-helper launched` -> `vmnet-helper socket ready` gap means the delay is before the packet socket becomes usable; a long `libkrun helper launched` -> `first successful vminitd RPC` gap is guest transport/readiness; and a long network-configuration gap is in the vminitd configuration RPCs.
 

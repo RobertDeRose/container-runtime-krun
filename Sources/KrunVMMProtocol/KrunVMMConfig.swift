@@ -109,14 +109,21 @@ public enum KrunDefaults {
   public static let memoryOverheadBytes: UInt64 = 128 * 1024 * 1024
   public static let maxVolumeCount = 24
 
+  static func bundledLibkrunPath(executableURL: URL) -> String {
+    executableURL
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("lib", isDirectory: true)
+      .appendingPathComponent("libkrun.dylib")
+      .path
+  }
+
   public static var libkrunPath: String {
     if let configured = ProcessInfo.processInfo.environment["LIBKRUN_DYLIB"], !configured.isEmpty {
       return configured
     }
-    for candidate in ["/opt/homebrew/lib/libkrun.dylib", "/usr/local/lib/libkrun.dylib"]
-    where FileManager.default.isReadableFile(atPath: candidate) {
-      return candidate
-    }
-    return "/opt/homebrew/lib/libkrun.dylib"
+    let executableURL = Bundle.main.executableURL
+      ?? URL(fileURLWithPath: CommandLine.arguments[0])
+    return bundledLibkrunPath(executableURL: executableURL)
   }
 }

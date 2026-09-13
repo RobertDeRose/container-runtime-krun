@@ -9,6 +9,7 @@ ITERATIONS=12
 COMMAND_TIMEOUT_SECONDS=180
 PREREQUISITE_TIMEOUT_SECONDS=600
 CLEANUP_TIMEOUT_SECONDS=30
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'USAGE'
@@ -75,7 +76,7 @@ if ! [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || ((COMMAND_TIMEOUT_SECONDS <
   exit 2
 fi
 
-for command in container python3 git make ps tar cmp; do
+for command in container python3 git mise ps tar cmp; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "required command not found: $command" >&2
     exit 1
@@ -406,10 +407,10 @@ fi
 
 if ((INSTALL)); then
   log "building and installing current checkout"
-  expect_success_with_timeout make_doctor "$PREREQUISITE_TIMEOUT_SECONDS" make doctor
-  expect_success_with_timeout make_check "$PREREQUISITE_TIMEOUT_SECONDS" make check
-  expect_success_with_timeout make_test "$PREREQUISITE_TIMEOUT_SECONDS" make test
-  expect_success_with_timeout make_install "$PREREQUISITE_TIMEOUT_SECONDS" make install
+  expect_success_with_timeout mise_doctor "$PREREQUISITE_TIMEOUT_SECONDS" mise run doctor
+  expect_success_with_timeout mise_check "$PREREQUISITE_TIMEOUT_SECONDS" mise run check
+  expect_success_with_timeout mise_test "$PREREQUISITE_TIMEOUT_SECONDS" mise run test
+  expect_success_with_timeout mise_install "$PREREQUISITE_TIMEOUT_SECONDS" mise run install
   if ((FAILURES > 0)); then
     log "build/install prerequisites failed; skipping runtime copy checks"
     finish_validation
@@ -420,6 +421,15 @@ if ((INSTALL)); then
   expect_success system_start container system start
   if ((FAILURES > 0)); then
     log "Apple Container restart failed; skipping runtime copy checks"
+    finish_validation
+    exit 1
+  fi
+fi
+
+if [[ "$RUNTIME" == "container-runtime-krun" ]]; then
+  expect_success libkrun_provenance "$SCRIPT_DIR/capture_libkrun_provenance.sh" "$RESULT_DIR"
+  if ((FAILURES > 0)); then
+    log "installed libkrun provenance validation failed; skipping runtime copy checks"
     finish_validation
     exit 1
   fi

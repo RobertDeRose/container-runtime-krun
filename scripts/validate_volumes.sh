@@ -52,7 +52,7 @@ while (($#)); do
   esac
 done
 
-for command in container python3 git make ps tar comm; do
+for command in container python3 git mise ps tar comm; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "required command not found: $command" >&2
     exit 1
@@ -252,12 +252,12 @@ list_krun_runtime_dirs >"$RESULT_DIR/initial-runtime-dirs.txt"
 list_volumes >"$RESULT_DIR/volume-list-initial.txt" || true
 
 git status --short >"$RESULT_DIR/git-status.txt" 2>&1 || true
-expect_success make_doctor make doctor
-expect_success make_check make check
-expect_success make_test make test
+expect_success mise_doctor mise run doctor
+expect_success mise_check mise run check
+expect_success mise_test mise run test
 
 if ((INSTALL)); then
-  expect_success make_install make install
+  expect_success mise_install mise run install
   if ((FAILURES > 0)); then
     log "build/install prerequisites failed; skipping runtime volume checks"
     finish_validation

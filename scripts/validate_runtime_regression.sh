@@ -74,7 +74,7 @@ if ! [[ "$MEMORY_OBSERVE_SECONDS" =~ ^[0-9]+$ ]] || ((MEMORY_OBSERVE_SECONDS < 0
   exit 2
 fi
 
-for command in container python3 git make ps vm_stat sysctl; do
+for command in container python3 git mise ps vm_stat sysctl; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "required command not found: $command" >&2
     exit 1
@@ -423,12 +423,12 @@ capture_runtime_state "$RESULT_DIR/runtime-state-initial.txt"
   done
 } | sort >"$RESULT_DIR/initial-sockets.txt"
 
-expect_success make_doctor make doctor
-expect_success make_check make check
-expect_success make_test make test
+expect_success mise_doctor mise run doctor
+expect_success mise_check mise run check
+expect_success mise_test mise run test
 
 if ((INSTALL)); then
-  expect_success make_install make install
+  expect_success mise_install mise run install
   expect_success system_stop container system stop
   expect_success system_start container system start
 fi

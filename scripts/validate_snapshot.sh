@@ -31,7 +31,7 @@ while (($#)); do
   esac
 done
 
-for c in container make git tar python3 ps; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
+for c in container mise git tar python3 ps; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 PREFIX="krun-snapshot-${STAMP}-$$"
 ID="$PREFIX-live"
@@ -76,10 +76,10 @@ trap cleanup EXIT INT TERM
 } >"$OUT/environment.txt"
 
 if ((INSTALL)); then
-  require_run make_doctor "make doctor" make doctor
-  require_run make_check "make check" make check
-  require_run make_test "make test" make test
-  require_run make_install "make install" make install
+  require_run mise_doctor "mise run doctor" mise run doctor
+  require_run mise_check "mise run check" mise run check
+  require_run mise_test "mise run test" mise run test
+  require_run mise_install "mise run install" mise run install
   require_run system_stop "container system stop" container system stop
   require_run system_start "container system start" container system start
 fi

@@ -43,6 +43,8 @@ The runtime plugin owns Apple Container semantics. The VMM helper owns only libk
 
 This split is deliberate:
 
+- the plugin package carries the exact libkrun build it was validated with instead of resolving a mutable Homebrew/system installation;
+- `LIBKRUN_DYLIB` is only an explicit development/test override for that packaged dependency;
 - `krun_start_enter()` blocks for the lifetime of the VM;
 - only the helper needs the Hypervisor.framework entitlement;
 - a libkrun failure does not load the VMM into the runtime XPC server itself;

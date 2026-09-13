@@ -210,15 +210,15 @@ record_step swift_version swift --version
 record_step python_version python3 --version
 record_step git_head git rev-parse HEAD
 record_step git_status git status --short --branch
-record_step brew_dependencies brew list --versions libkrun virglrenderer vmnet-helper
+record_step brew_dependencies brew list --versions llvm lld xz vmnet-helper
 record_step system_status_before container system status --format json
 record_step network_inspect_before container network inspect "$NETWORK"
-record_step make_doctor make doctor
-record_step make_check make check
-record_step make_test make test
+record_step mise_doctor mise run doctor
+record_step mise_check mise run check
+record_step mise_test mise run test
 
 if [[ "$INSTALL" -eq 1 ]]; then
-  record_step make_install make install
+  record_step mise_install mise run install
   record_step container_system_stop container system stop
   record_step container_system_start container system start
   record_step system_status_after_restart container system status --format json
@@ -482,7 +482,7 @@ fi
   echo "  system-network-lifecycle.txt    Apple allocation/release log events"
   echo "  runtime-state-live.txt          runtime/helper/socket samples while running"
   echo "  runtime-state-after-delete.txt  post-delete leak check"
-  echo "  make_check.txt / make_test.txt  repository validation"
+  echo "  mise_check.txt / mise_test.txt  repository validation"
 } >"$OUT/SUMMARY.txt"
 
 mkdir -p "$OUTPUT_ROOT"
