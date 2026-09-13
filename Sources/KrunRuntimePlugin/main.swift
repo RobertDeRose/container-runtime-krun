@@ -83,7 +83,6 @@ extension KrunRuntimePlugin {
           RuntimeRoutes.copyIn.rawValue: XPCServer.route(service.copyIn),
           RuntimeRoutes.copyOut.rawValue: XPCServer.route(service.copyOut),
           RuntimeRoutes.snapshotDisk.rawValue: XPCServer.route(service.snapshotDisk),
-          RuntimeRoutes.clean.rawValue: XPCServer.route(service.clean),
         ],
         log: log
       )

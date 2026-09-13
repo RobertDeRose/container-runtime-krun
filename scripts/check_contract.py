@@ -24,7 +24,6 @@ routes = {
     "copyIn",
     "copyOut",
     "snapshotDisk",
-    "clean",
 }
 wired = set(re.findall(r"RuntimeRoutes\.([A-Za-z0-9_]+)\.rawValue", main))
 wired.discard("createEndpoint")
