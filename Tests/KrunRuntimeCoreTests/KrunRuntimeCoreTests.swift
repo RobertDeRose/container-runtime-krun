@@ -160,3 +160,22 @@ import Testing
   #expect(relays[1].ociMount?.destination == "/var/host-services/ssh-auth.sock")
   #expect(relays[1].ociMount?.options == ["bind"])
 }
+
+@Test func featureGateAllowsMultipleAllocationOnlyNetworkConfigurations() throws {
+  let image = ImageDescription(
+    reference: "example.invalid/test:latest",
+    descriptor: Descriptor(
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: "sha256:" + String(repeating: "4", count: 64),
+      size: 0
+    )
+  )
+  let process = ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+  var container = ContainerConfiguration(id: "multi-network", image: image, process: process)
+  container.networks = [
+    AttachmentConfiguration(network: "net-a", options: AttachmentOptions(hostname: "multi-network")),
+    AttachmentConfiguration(network: "net-b", options: AttachmentOptions(hostname: "multi-network")),
+  ]
+
+  try KrunFeatureGate.validate(container)
+}

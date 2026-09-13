@@ -3,9 +3,6 @@ import ContainerizationError
 
 public enum KrunFeatureGate {
   public static func validate(_ config: ContainerConfiguration) throws {
-    if config.networks.count > 1 {
-      throw unsupported("multiple network attachments")
-    }
     if !config.publishedPorts.isEmpty && config.networks.isEmpty {
       throw unsupported("published TCP/UDP ports without a network attachment")
     }
