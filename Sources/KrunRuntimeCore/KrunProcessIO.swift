@@ -195,21 +195,34 @@ public final class KrunProcessIO: @unchecked Sendable {
   }
 
   public func waitForOutput() async {
-    await withTaskGroup(of: Void.self) { group in
-      group.addTask {
-        for task in self.outputTasks {
-          await task.value
-        }
-      }
-      group.addTask {
-        try? await Task.sleep(for: .seconds(3))
-      }
-      _ = await group.next()
-      group.cancelAll()
-    }
+    await Self.waitForOutputTasks(outputTasks, timeout: .seconds(3))
     inputTask?.cancel()
     for index in 1...2 {
       try? hostHandles[index]?.close()
+    }
+  }
+
+  static func waitForOutputTasks(_ tasks: [Task<Void, Never>], timeout: Duration) async {
+    await withTaskGroup(of: Bool.self) { group in
+      group.addTask {
+        for task in tasks {
+          await task.value
+        }
+        return true
+      }
+      group.addTask {
+        // Caller cancellation also ends the grace period immediately.
+        try? await Task.sleep(for: timeout)
+        return false
+      }
+      if await group.next() == false {
+        // The relays are unstructured tasks, not children of this group.
+        // Cancel them before the group joins the child awaiting their values.
+        for task in tasks {
+          task.cancel()
+        }
+      }
+      group.cancelAll()
     }
   }
 
