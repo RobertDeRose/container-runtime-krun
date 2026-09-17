@@ -82,3 +82,77 @@ private func outputDrainWatchdog(_ tasks: [Task<Void, Never>]) -> Task<Void, Nev
     for task in tasks { task.cancel() }
   }
 }
+
+@Test func detachedInitLoggingReservesOutputStreams() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let logPath = directory.appendingPathComponent("stdio.log")
+  #expect(FileManager.default.createFile(atPath: logPath.path, contents: nil))
+  let processLog = try KrunProcessLog(path: logPath)
+  let entries = (0..<3).map { index in
+    KrunSocketLayout.IOEntry(
+      port: UInt32(100 + index),
+      path: directory.appendingPathComponent("stdio-\(index).sock").path
+    )
+  }
+  let pool = KrunPortPool(entries: entries)
+
+  let io = try await KrunProcessIO.prepare(
+    hostHandles: [nil, nil, nil],
+    terminal: false,
+    pool: pool,
+    processLog: processLog
+  )
+  #expect(io.stdinPort == nil)
+  #expect(io.stdoutPort == 100)
+  #expect(io.stderrPort == 101)
+  await io.close()
+}
+
+@Test func terminalInitLoggingUsesMergedOutputStream() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let logPath = directory.appendingPathComponent("stdio.log")
+  #expect(FileManager.default.createFile(atPath: logPath.path, contents: nil))
+  let processLog = try KrunProcessLog(path: logPath)
+  let entries = (0..<2).map { index in
+    KrunSocketLayout.IOEntry(
+      port: UInt32(200 + index),
+      path: directory.appendingPathComponent("terminal-\(index).sock").path
+    )
+  }
+  let pool = KrunPortPool(entries: entries)
+
+  let io = try await KrunProcessIO.prepare(
+    hostHandles: [nil, nil, nil],
+    terminal: true,
+    pool: pool,
+    processLog: processLog
+  )
+  #expect(io.stdinPort == nil)
+  #expect(io.stdoutPort == 200)
+  #expect(io.stderrPort == nil)
+  await io.close()
+}
+
+@Test func processLogSerializesPersistentOutput() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let logPath = directory.appendingPathComponent("stdio.log")
+  #expect(FileManager.default.createFile(atPath: logPath.path, contents: nil))
+  let processLog = try KrunProcessLog(path: logPath)
+  await processLog.write(Data("stdout\n".utf8))
+  await processLog.write(Data("stderr\n".utf8))
+  await processLog.close()
+
+  #expect(try String(contentsOf: logPath, encoding: .utf8) == "stdout\nstderr\n")
+}

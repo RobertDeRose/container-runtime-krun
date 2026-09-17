@@ -422,3 +422,60 @@ import Testing
   }
   #expect(sizeMismatchRejected)
 }
+
+@Test func cleanPolicyIncludesWritableRootAndBlockMounts() throws {
+  let image = ImageDescription(
+    reference: "example.invalid/test:latest",
+    descriptor: Descriptor(
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: "sha256:" + String(repeating: "8", count: 64),
+      size: 0
+    )
+  )
+  let process = ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+  var container = ContainerConfiguration(id: "clean-test", image: image, process: process)
+  container.mounts = [
+    .volume(
+      name: "rw",
+      format: "ext4",
+      source: "/tmp/rw.img",
+      destination: "/rw",
+      options: []
+    ),
+    .volume(
+      name: "ro",
+      format: "ext4",
+      source: "/tmp/ro.img",
+      destination: "/ro",
+      options: ["ro"]
+    ),
+    .tmpfs(destination: "/tmpfs", options: []),
+  ]
+
+  #expect(KrunCleanPolicy.targets(for: container) == ["/", "/rw"])
+}
+
+@Test func cleanPolicySkipsReadOnlyRootFilesystem() throws {
+  let image = ImageDescription(
+    reference: "example.invalid/test:latest",
+    descriptor: Descriptor(
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: "sha256:" + String(repeating: "9", count: 64),
+      size: 0
+    )
+  )
+  let process = ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+  var container = ContainerConfiguration(id: "clean-readonly", image: image, process: process)
+  container.readOnly = true
+  container.mounts = [
+    .volume(
+      name: "data",
+      format: "ext4",
+      source: "/tmp/data.img",
+      destination: "/data",
+      options: []
+    )
+  ]
+
+  #expect(KrunCleanPolicy.targets(for: container) == ["/data"])
+}

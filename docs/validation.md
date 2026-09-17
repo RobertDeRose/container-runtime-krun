@@ -124,7 +124,7 @@ Verify each remaining unsupported feature produces an explicit error before VM s
 - request Rosetta;
 - request nested virtualization.
 
-The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.4.1 has no public CLI surface for `dial`. Its runtime SDK defines `clean`, but this plugin leaves that route unregistered until filesystem trim is implemented. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, SSH forwarding, snapshot/export, and multiple networks are covered by dedicated gates instead.
+The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.4.1 has no public CLI surface for `dial`. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, SSH forwarding, snapshot/export, logs/clean, and multiple networks are covered by dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 
@@ -201,3 +201,14 @@ scripts/benchmark_runtimes.sh --install-krun --iterations 5
 The harness compares `container-runtime-linux` and `container-runtime-krun` with a warmed image and networking disabled for the repeated microbenchmarks. Repeated samples use deterministic paired AB/BA ordering so host drift is shared between the two runtimes instead of accumulating in separate runtime-wide blocks. Startup measures detached container start only; teardown is outside that timed sample. Volume writes run through `container exec` in one already-running volume-backed container per runtime, so VM boot and volume attachment are not part of every write sample.
 
 Raw TSV samples and a summary table cover startup, exec, deterministic CPU work, copy in/out, persistent-container volume writes, stop/delete latency, and host process footprint. The harness also captures live krun lifecycle events and preserves each krun startup sample's `krun-vmm.log` before deleting the container, allowing runtime and helper sub-phases to be correlated with the timing samples. It repeats the established 1 GiB guest-memory release workload and records host memory/process observations without imposing a fixed RSS-reclamation threshold.
+
+
+## Gate 16: persistent logs and filesystem trim
+
+Validate the two remaining Container 1.4.1 runtime-parity surfaces with:
+
+```bash
+scripts/validate_logs_clean.sh --install
+```
+
+The validator starts a detached container whose init process writes distinct stdout and stderr markers, verifies `container logs` returns both while the container is running, then verifies the same persisted output remains readable after stop. It then starts a container with a writable Apple volume, creates and deletes data on both rootfs and the volume, and requires `container clean` to complete successfully. This exercises vminitd TRIM against every writable block-backed target. The container must remain usable afterward, while a stopped container must reject `container clean` in the same way as Apple's native runtime.
