@@ -1,3 +1,4 @@
+import ContainerAPIClient
 import ContainerNetworkClient
 import ContainerResource
 import ContainerRuntimeClient
@@ -784,16 +785,31 @@ public actor KrunRuntimeService {
       return NetworkResources(sessions: [], attachments: [], backends: [])
     }
 
+    let resourceClient = ContainerAPIClient.NetworkClient()
     var sessions: [XPCClientSession] = []
     var attachments: [Attachment] = []
     var backends: [KrunVMNetBackend] = []
     do {
       for (index, info) in networkInfos.enumerated() {
-        guard info.plugin == "container-network-vmnet" else {
-          throw KrunFeatureGate.unsupported("network plugin \(info.plugin)")
-        }
         let attachmentConfig = config.networks[index]
-        let client = NetworkClient(id: attachmentConfig.network, plugin: info.plugin)
+        let network = try await resolveNetwork(
+          requestedName: attachmentConfig.network,
+          resourceClient: resourceClient
+        )
+        if attachmentConfig.network != ContainerAPIClient.NetworkClient.defaultNetworkName {
+          guard info.plugin == network.configuration.plugin else {
+            throw ContainerizationError(
+              .invalidState,
+              message:
+                "network plugin changed during container bootstrap for \(attachmentConfig.network): "
+                + "expected \(info.plugin), found \(network.configuration.plugin)"
+            )
+          }
+        }
+        let client = ContainerNetworkClient.NetworkClient(
+          id: network.id,
+          plugin: network.configuration.plugin
+        )
         let session = client.connect()
         sessions.append(session)
         KrunLifecycleTrace.mark(
@@ -801,7 +817,8 @@ public actor KrunRuntimeService {
           startedAt: startedAt,
           event: "network allocation start",
           metadata: [
-            "network": "\(attachmentConfig.network)",
+            "network": "\(network.id)",
+            "requested_network": "\(attachmentConfig.network)",
             "network_index": "\(index)",
           ]
         )
@@ -853,6 +870,66 @@ public actor KrunRuntimeService {
       for session in sessions { session.close() }
       throw error
     }
+  }
+
+  private func resolveNetwork(
+    requestedName: String,
+    resourceClient: ContainerAPIClient.NetworkClient
+  ) async throws -> NetworkResource {
+    if requestedName == ContainerAPIClient.NetworkClient.defaultNetworkName {
+      let builtin = try await resourceClient.get(id: requestedName)
+      do {
+        try KrunNetworkPolicy.validateCompatible(builtin)
+        return builtin
+      } catch let error as ContainerizationError where error.code == .unsupported {
+        guard #available(macOS 26, *) else {
+          throw error
+        }
+        return try await ensureManagedDefaultNetwork(resourceClient: resourceClient)
+      }
+    }
+
+    let network = try await resourceClient.get(id: requestedName)
+    try KrunNetworkPolicy.validateCompatible(network)
+    return network
+  }
+
+  private func ensureManagedDefaultNetwork(
+    resourceClient: ContainerAPIClient.NetworkClient
+  ) async throws -> NetworkResource {
+    for _ in 0..<3 {
+      let networks = try await resourceClient.list()
+      if let existing = networks.first(where: {
+        $0.id == KrunNetworkPolicy.managedDefaultNetworkName
+      }) {
+        try KrunNetworkPolicy.validateCompatible(existing)
+        return existing
+      }
+
+      let configuration = try KrunNetworkPolicy.managedDefaultConfiguration(existing: networks)
+      do {
+        let network = try await resourceClient.create(configuration: configuration)
+        try KrunNetworkPolicy.validateCompatible(network)
+        log.info(
+          "created managed default network",
+          metadata: [
+            "network": "\(network.id)",
+            "subnet": "\(network.status.ipv4Subnet)",
+          ]
+        )
+        return network
+      } catch let error as ContainerizationError where error.code == .exists {
+        // Another container may have created `krun`, or another network may have
+        // claimed the selected subnet after our list call. Refresh and retry.
+        continue
+      }
+    }
+
+    throw ContainerizationError(
+      .exists,
+      message:
+        "container-runtime-krun could not create its managed default network after concurrent network changes"
+    )
   }
 
   private func waitForStopCompletion() async {

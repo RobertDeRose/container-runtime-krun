@@ -56,7 +56,7 @@ On `bootstrap`:
 
 1. Materialize the normal Apple runtime bundle from `runtime-configuration.json` if needed.
 2. Reject unsupported configuration before starting a VM.
-3. If a network is requested, allocate it through Apple's network plugin and attach libkrun to the resulting vmnet network.
+3. Resolve Apple's built-in `default` network to a compatible allocation-only resource, creating the managed `krun` network through the Apple network API when the built-in resource is incompatible; validate explicit networks before allocating them.
 4. Create a short private directory under `/tmp` for Unix sockets.
 5. Predeclare the vminitd/stdin/stdout/copy mappings, network devices, and resolved Apple volume disks in the helper configuration.
 6. Start `container-krun-vmm-helper`.
@@ -79,13 +79,15 @@ The helper disables libkrun's implicit vsock because its macOS default enables T
 
 ## Networking
 
-v0.2 keeps Apple Container's network plugin as the source of truth for attachment allocation and lifetime. The runtime opens a persistent `ContainerNetworkClient` session and requests the configured hostname/MAC, yielding the same `Attachment` data the stock runtime consumes.
+Apple Container's network service remains the source of truth for network resources, attachment allocation, and lifetime. When the container configuration names the built-in `default` network, the runtime first inspects that resource. A compatible NAT `container-network-vmnet` network with `variant=allocationOnly` is used directly. On macOS 26, where Apple's built-in default uses the incompatible `reserved` variant, the runtime resolves the request to a managed network named `krun`; if `krun` does not exist, it creates it through `ContainerAPIClient.NetworkClient`. Subnet selection starts at `192.168.200.0/24` and advances through non-overlapping `/24` networks as needed.
 
-Apple's network plugin remains authoritative for attachment allocation and lifetime. For `allocationOnly`, libkrun needs a packet backend, so the runtime launches `vmnet-helper` in shared+isolated mode on the allocated subnet and passes its Unix datagram socket plus the Apple-allocated MAC to `krun_add_net_unixgram`. No second IPAM layer is introduced.
+Explicit network names are not rewritten. Before allocation, the runtime inspects the requested resource and requires `container-network-vmnet`, NAT mode, and `variant=allocationOnly`; incompatible resources fail with an actionable error. The runtime then opens a persistent `ContainerNetworkClient` session and requests the configured hostname/MAC, yielding the normal Apple `Attachment` data.
+
+For `allocationOnly`, libkrun needs a packet backend, so the runtime launches `vmnet-helper` in shared+isolated mode on the allocated subnet and passes its Unix datagram socket plus the Apple-allocated MAC to `krun_add_net_unixgram`. No second IPAM layer is introduced.
 
 After vminitd is ready, the controller applies the Apple attachment to `eth0`: address, MTU, any required link route, default route, DNS, and the container hostname entry. Network statistics come from vminitd's existing cgroup/network stats surface.
 
-The first slice intentionally supports one `container-network-vmnet` attachment using the `allocationOnly` variant on macOS 26. Published TCP/UDP ports target that first attachment. Multiple attachments and network performance offloads remain follow-up work. `--network none` continues to work without a packet backend, but cannot publish ports because there is no guest IP to target. The default macOS 26 `reserved` variant is rejected: `vmnet_interface_start_with_network` requires the consumer of a serialized network to have the same executable identity as the process that created it, and Apple's stock runtime crosses that boundary through Virtualization.framework rather than raw vmnet I/O.
+`--network none` continues to work without a packet backend, but cannot publish ports because there is no guest IP to target. Multiple compatible `allocationOnly` attachments are supported in request order. The macOS 26 `reserved` variant remains incompatible: `vmnet_interface_start_with_network` requires the consumer of a serialized network to have the same executable identity as the process that created it, and Apple's stock runtime crosses that boundary through Virtualization.framework rather than raw vmnet I/O. The managed `krun` network avoids that boundary without changing Apple Container's network allocation protocol.
 
 ## Published TCP/UDP ports
 

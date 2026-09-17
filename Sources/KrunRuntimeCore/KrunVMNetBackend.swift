@@ -54,11 +54,8 @@ public final class KrunVMNetBackend: @unchecked Sendable {
         throw ContainerizationError(
           .unsupported,
           message:
-            "container-runtime-krun cannot attach to Apple Container's reserved vmnet network; "
-            + "macOS requires a process using vmnet_interface_start_with_network to have the same "
-            + "executable identity as the process that created the serialized network. Create an "
-            + "allocationOnly network with `container network create --subnet <CIDR> --option "
-            + "variant=allocationOnly krun` and run with `--network krun`."
+            "network \(attachment.network) is incompatible with container-runtime-krun; "
+            + "the runtime requires container-network-vmnet with variant=allocationOnly"
         )
       default:
         throw KrunFeatureGate.unsupported(

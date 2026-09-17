@@ -20,7 +20,7 @@ v0.4.0 establishes the lifecycle, networking, host-integration, and selected par
 | signal / stop / wait | yes |
 | container statistics | yes |
 | automatic free-page reporting | yes, provided by libkrun + Apple kernel |
-| Networking | yes, multiple Apple `container-network-vmnet` `allocationOnly` attachments |
+| Networking | yes, managed default `allocationOnly` network plus explicit compatible attachments |
 | Published TCP/UDP ports | yes, through Apple `SocketForwarder` on the first attachment |
 | Apple named/anonymous volumes | yes, libkrun virtio-blk |
 | Host bind/virtiofs mounts | no |
@@ -130,20 +130,28 @@ container run --rm \
   alpine:3.20 sh -c 'echo pid=$$; sleep 1'
 ```
 
-For networking, create non-overlapping `allocationOnly` networks and select one or more explicitly:
+Networking works without any setup. When Apple Container requests its built-in `default` network,
+`container-runtime-krun` uses it directly when it is already a compatible `allocationOnly` network. On macOS 26,
+where Apple's built-in default uses the incompatible `reserved` variant, the runtime creates and uses a managed `krun`
+network instead. The managed network is a `container-network-vmnet` NAT network with `variant=allocationOnly`; subnet
+selection chooses the first unused `/24` from `192.168.200.0/24` through `192.168.254.0/24`.
+
+```bash
+container run --rm \
+  --runtime container-runtime-krun \
+  alpine:3.20 ping -c 1 1.1.1.1
+```
+
+Explicit networks are still honored. They must already exist and use `container-network-vmnet`, NAT mode, and
+`variant=allocationOnly`; incompatible networks fail before allocation with an actionable error. Additional
+compatible networks become `eth1`, `eth2`, ... while `eth0` remains primary:
 
 ```bash
 container network create \
-  --subnet 192.168.200.0/24 \
+  --subnet 192.168.220.0/24 \
   --option variant=allocationOnly \
-  krun
+  krun-secondary
 
-container run --rm \
-  --runtime container-runtime-krun \
-  --network krun \
-  alpine:3.20 ping -c 1 1.1.1.1
-
-# Additional allocationOnly networks become eth1, eth2, ...; eth0 remains primary.
 container run --rm \
   --runtime container-runtime-krun \
   --network krun \
@@ -156,7 +164,6 @@ TCP and UDP ports can be published through the same Apple `SocketForwarder` impl
 ```bash
 container run --rm \
   --runtime container-runtime-krun \
-  --network krun \
   --publish 127.0.0.1:8080:80/tcp \
   nginx:alpine
 ```
@@ -211,7 +218,7 @@ libkrun's vsock mappings are configured before VM start. The runtime currently r
 
 The stdio pool supports 32 simultaneously connected processes when all three stdio streams are present. Ports are returned to the pool when a process is cleaned up.
 
-Apple's network plugin remains authoritative for attachment allocation/IPAM and the runtime supports its `allocationOnly` variant through one external `vmnet-helper` packet backend per attachment. The Apple-assigned address and MTU are configured on `eth0`, `eth1`, ... in request order. `eth0` remains authoritative for the default route, fallback DNS, hostname identity, and published TCP/UDP forwarding. The default `reserved` variant is rejected with an actionable error because a runtime-only plugin cannot legally attach raw vmnet I/O to a serialized network created by `container-network-vmnet`.
+Apple's network plugin remains authoritative for attachment allocation/IPAM. A request for Apple Container's built-in `default` network uses that resource directly when it is compatible; on macOS 26 the incompatible `reserved` default is resolved to the runtime-managed `krun` `allocationOnly` network, which is created through Apple Container's public network API when missing. Explicit network names are preserved and must be compatible (`container-network-vmnet`, NAT, `variant=allocationOnly`). The Apple-assigned address and MTU are configured on `eth0`, `eth1`, ... in request order. `eth0` remains authoritative for the default route, fallback DNS, hostname identity, and published TCP/UDP forwarding.
 
 See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
