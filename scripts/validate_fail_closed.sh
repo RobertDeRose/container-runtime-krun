@@ -23,7 +23,7 @@ Options:
   --timeout SECONDS  Per-operation timeout (default: 60).
   --dial-helper PATH  Optional executable that calls ContainerAPIClient.dial
                       as: HELPER CONTAINER_ID PORT. When omitted, dial is
-                      reported as SKIP because Container 1.3.1 has no
+                      reported as SKIP because Container 1.4.1 has no
                       general-purpose dial CLI command.
   -h, --help         Show this help.
 
@@ -436,7 +436,7 @@ fi
 container inspect "$ROUTE_ID" >"$RESULT_DIR/route-container-inspect.txt" 2>&1 || true
 capture_runtime_state "$RESULT_DIR/runtime-state-routes-live.txt"
 
-# Container 1.3.1 has no general-purpose CLI command for ContainerClient.dial.
+# Container 1.4.1 has no general-purpose CLI command for ContainerClient.dial.
 # An externally supplied validation helper may exercise it without forcing this
 # script to compile a second Apple Container dependency graph.
 if [[ -n "$DIAL_HELPER" ]]; then
@@ -449,7 +449,7 @@ if [[ -n "$DIAL_HELPER" ]]; then
     fail "dial helper is not executable: $DIAL_HELPER"
   fi
 else
-  skip "route-dial not behaviorally reachable: Container 1.3.1 has no general-purpose dial CLI command"
+  skip "route-dial not behaviorally reachable: Container 1.4.1 has no general-purpose dial CLI command"
 fi
 
 # The route probes must fail without damaging the live container.
@@ -512,7 +512,7 @@ grep -E "$PREFIX|container-runtime-krun does not support" \
   if [[ -n "$DIAL_HELPER" ]]; then
     echo "dial_validation=external helper: $DIAL_HELPER"
   else
-    echo "dial_validation=skipped: no public Container 1.3.1 dial CLI"
+    echo "dial_validation=skipped: no public Container 1.4.1 dial CLI"
   fi
 } >"$RESULT_DIR/SUMMARY.txt"
 

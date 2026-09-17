@@ -43,7 +43,7 @@ enum KrunCopyOperations {
       source: source,
       destination: destination,
       sourceIsDirectory: isArchive,
-      guestDestination: resolvedDestination.url,
+      guestDestination: resolvedDestination,
       agent: agent
     )
     let channel = try await KrunCopyChannel.prepare(pool: pool)
@@ -51,7 +51,8 @@ enum KrunCopyOperations {
       group.addTask {
         try await agent.copy(
           direction: .copyIn,
-          guestPath: guestPath,
+          root: guestPath.root,
+          path: guestPath.path,
           vsockPort: channel.port,
           mode: mode,
           createParents: createParents,
@@ -83,13 +84,13 @@ enum KrunCopyOperations {
       )
     }
 
-    let guestPath = KrunContainerPath.resolve(controller: controller, path: source).url
+    let guestPath = KrunContainerPath.resolve(controller: controller, path: source)
     let agent = controller.agent
 
     // libkrun forwards all guest-to-host streams on one muxer thread. Learn the
     // transfer shape first so the data socket can be drained as soon as it connects,
     // without waiting for streamed copy metadata on the same vsock device.
-    let sourceStat = try await agent.stat(path: guestPath)
+    let sourceStat = try await agent.stat(root: guestPath.root, path: guestPath.path)
     let preflightIsArchive = (sourceStat.mode & UInt32(S_IFMT)) == UInt32(S_IFDIR)
     guard preflightIsArchive || sourceStat.size >= 0 else {
       throw ContainerizationError(
@@ -107,7 +108,8 @@ enum KrunCopyOperations {
         defer { metadataContinuation.finish() }
         try await agent.copy(
           direction: .copyOut,
-          guestPath: guestPath,
+          root: guestPath.root,
+          path: guestPath.path,
           vsockPort: channel.port,
           onMetadata: { metadata in
             metadataContinuation.yield(metadata)
@@ -179,12 +181,12 @@ enum KrunCopyOperations {
     source: URL,
     destination: URL,
     sourceIsDirectory: Bool,
-    guestDestination: URL,
+    guestDestination: KrunResolvedContainerPath,
     agent: Vminitd
-  ) async throws -> URL {
+  ) async throws -> KrunResolvedContainerPath {
     let stat: ContainerizationOS.Stat?
     do {
-      stat = try await agent.stat(path: guestDestination)
+      stat = try await agent.stat(root: guestDestination.root, path: guestDestination.path)
     } catch let error as ContainerizationError where error.code == .notFound {
       stat = nil
     }

@@ -2,15 +2,26 @@ import ContainerResource
 import Foundation
 
 struct KrunResolvedContainerPath: Sendable {
-  let url: URL
+  let root: String
+  let path: String
   let readOnly: Bool
+
+  var url: URL {
+    guard path != "/" else { return URL(filePath: root) }
+    return URL(filePath: root).appending(path: String(path.dropFirst()))
+  }
+
+  func appendingPathComponent(_ component: String) -> KrunResolvedContainerPath {
+    let appendedPath = URL(filePath: path).appending(path: component).path
+    return KrunResolvedContainerPath(root: root, path: appendedPath, readOnly: readOnly)
+  }
 }
 
 enum KrunContainerPath {
-  /// Translate a path from the container mount namespace to the guest-global path
-  /// that vminitd can access. Block-backed volumes are staged outside the rootfs
-  /// and bind-mounted into the OCI namespace, so operations that run in vminitd's
-  /// namespace must address the staging mount instead of the shadowed rootfs path.
+  /// Translate a path from the container mount namespace to the guest filesystem
+  /// root and path that vminitd can access. Block-backed volumes are staged
+  /// outside the rootfs and bind-mounted into the OCI namespace, so operations
+  /// that run in vminitd's namespace must use the staging mount as their root.
   static func resolve(
     controller: KrunVMController,
     path: URL
@@ -58,25 +69,26 @@ enum KrunContainerPath {
 
     guard let destination = matchedDestination, let attachment = matchedAttachment else {
       return KrunResolvedContainerPath(
-        url: append(containerPath: containerPath, toGuestRoot: rootPath),
+        root: rootPath,
+        path: containerPath,
         readOnly: false
       )
     }
 
     let relative: String
     if containerPath == destination {
-      relative = ""
+      relative = "/"
     } else if destination == "/" {
-      relative = String(containerPath.dropFirst())
+      relative = containerPath
     } else {
-      relative = String(containerPath.dropFirst(destination.count + 1))
+      relative = String(containerPath.dropFirst(destination.count))
     }
 
-    let guestPath =
-      relative.isEmpty
-      ? URL(filePath: attachment.stagingPath)
-      : URL(filePath: attachment.stagingPath).appending(path: relative)
-    return KrunResolvedContainerPath(url: guestPath, readOnly: matchedReadOnly)
+    return KrunResolvedContainerPath(
+      root: attachment.stagingPath,
+      path: relative,
+      readOnly: matchedReadOnly
+    )
   }
 
   private static func normalizedAbsolutePath(_ path: String) -> String {
@@ -88,12 +100,5 @@ enum KrunContainerPath {
   private static func contains(_ path: String, inMount mount: String) -> Bool {
     if mount == "/" { return path.hasPrefix("/") }
     return path == mount || path.hasPrefix("\(mount)/")
-  }
-
-  private static func append(containerPath: String, toGuestRoot rootPath: String) -> URL {
-    if containerPath == "/" {
-      return URL(filePath: rootPath)
-    }
-    return URL(filePath: rootPath).appending(path: String(containerPath.dropFirst()))
   }
 }

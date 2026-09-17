@@ -204,6 +204,87 @@ import Testing
   try KrunFeatureGate.validate(container)
 }
 
+@Test func containerPathUsesRootfsAsVminitdRoot() {
+  let image = ImageDescription(
+    reference: "example.invalid/test:latest",
+    descriptor: Descriptor(
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: "sha256:" + String(repeating: "5", count: 64),
+      size: 0
+    )
+  )
+  let process = ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+  let container = ContainerConfiguration(id: "path-test", image: image, process: process)
+
+  let resolved = KrunContainerPath.resolve(
+    config: container,
+    rootPath: "/run/container/path-test/rootfs",
+    volumeAttachments: [],
+    path: URL(filePath: "/var/lib/example/data.txt")
+  )
+
+  #expect(resolved.root == "/run/container/path-test/rootfs")
+  #expect(resolved.path == "/var/lib/example/data.txt")
+  #expect(resolved.url.path == "/run/container/path-test/rootfs/var/lib/example/data.txt")
+  #expect(!resolved.readOnly)
+}
+
+@Test func containerPathUsesVolumeStagingRoot() {
+  let image = ImageDescription(
+    reference: "example.invalid/test:latest",
+    descriptor: Descriptor(
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: "sha256:" + String(repeating: "6", count: 64),
+      size: 0
+    )
+  )
+  let process = ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+  var container = ContainerConfiguration(id: "volume-path-test", image: image, process: process)
+  container.mounts = [
+    .volume(
+      name: "data",
+      format: "ext4",
+      source: "/tmp/data.img",
+      destination: "/var/lib/data",
+      options: ["ro"]
+    )
+  ]
+  let attachment = KrunVolumeAttachment(
+    name: "data",
+    source: "/tmp/data.img",
+    stagingPath: "/run/container/volume-path-test/volumes/0",
+    devicePath: "/dev/vdc",
+    blockID: "volume0",
+    directIO: false,
+    syncMode: .relaxed,
+    readOnly: true
+  )
+
+  let resolved = KrunContainerPath.resolve(
+    config: container,
+    rootPath: "/run/container/volume-path-test/rootfs",
+    volumeAttachments: [attachment],
+    path: URL(filePath: "/var/lib/data/subdir/file.txt")
+  )
+
+  #expect(resolved.root == "/run/container/volume-path-test/volumes/0")
+  #expect(resolved.path == "/subdir/file.txt")
+  #expect(resolved.url.path == "/run/container/volume-path-test/volumes/0/subdir/file.txt")
+  #expect(resolved.readOnly)
+}
+
+@Test func containerPathAppendsWithinResolvedRoot() {
+  let resolved = KrunResolvedContainerPath(
+    root: "/run/container/example/rootfs",
+    path: "/tmp",
+    readOnly: false
+  ).appendingPathComponent("payload.txt")
+
+  #expect(resolved.root == "/run/container/example/rootfs")
+  #expect(resolved.path == "/tmp/payload.txt")
+  #expect(resolved.url.path == "/run/container/example/rootfs/tmp/payload.txt")
+}
+
 @Test func copyBytesHonorsKnownPayloadLength() throws {
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

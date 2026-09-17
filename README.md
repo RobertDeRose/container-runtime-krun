@@ -41,8 +41,8 @@ v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` 
 ## Prerequisites
 
 - Apple Silicon Mac
-- Apple Container 1.3.1 / commit `a9a62e28f6beb88940122a3d7b286f2d5ae8053a`
-- Containerization `0.42.0`
+- Apple Container 1.4.1 / commit `9a8917ca2da5cd6ba059b9ba5ca5a74892e9bb7d`
+- Containerization `0.45.0`
 - mise 2026.9.3+
 - Swift 6.2+ from Xcode
 - Homebrew `llvm`, `lld`, and `xz` as libkrun build dependencies
@@ -219,4 +219,4 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
 
-v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. v0.5 development adds live rootfs snapshot/export, multiple allocation-only attachments, and a non-gating comparison harness against Apple's default runtime. `container clean` remains deferred because Container 1.3.1 does not expose the public command needed to validate it. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.
+v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. v0.5 development adds live rootfs snapshot/export, multiple allocation-only attachments, and a non-gating comparison harness against Apple's default runtime. `container clean` remains deferred; Container 1.4.1 exposes the route, but this runtime has not implemented filesystem trim yet. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.

@@ -129,7 +129,7 @@ Verify each remaining unsupported feature produces an explicit error before VM s
 - request Rosetta;
 - request nested virtualization.
 
-The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.3.1 has no public CLI surface for `dial`, and its runtime SDK does not define the later `clean` route, so this plugin does not register `clean`. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, SSH forwarding, snapshot/export, and multiple networks are covered by dedicated gates instead.
+The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.4.1 has no public CLI surface for `dial`. Its runtime SDK defines `clean`, but this plugin leaves that route unregistered until filesystem trim is implemented. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, SSH forwarding, snapshot/export, and multiple networks are covered by dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 

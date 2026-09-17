@@ -97,7 +97,7 @@ Apple's stock runtime also invokes its package-scoped `LocalNetworkPrivacy` help
 
 ## Process lifecycle
 
-The runtime constructs OCI specs directly because `LinuxProcessConfiguration.toOCI()` is package-scoped in Containerization 0.42.0.
+The runtime constructs OCI specs directly because `LinuxProcessConfiguration.toOCI()` is package-scoped in Containerization 0.45.0.
 
 The generated spec preserves the stock runtime's important baseline:
 
@@ -197,9 +197,9 @@ Rosetta is deliberately excluded from the active roadmap. If x86_64 emulation is
 
 ### v0.5: storage lifecycle, multiple networks, and measurement
 
-Live export follows Apple's Container 1.3.1 runtime contract. Containerization 0.42 translates the container-relative `/` freeze request to the mounted guest rootfs path before calling vminitd; this runtime talks to vminitd directly, so it freezes that same mounted rootfs path explicitly, copies the root ext4 image on the host, and thaws on both success and copy failure. `FIFREEZE` synchronizes the target filesystem before returning, so no additional guest protocol or global `sync` is required. Booted-but-not-started containers can be copied without a freeze. Attached volumes remain separate and are not folded into the exported root filesystem image.
+Live export follows Apple's Container 1.4.1 runtime contract. Containerization 0.45 translates the container-relative `/` freeze request to the mounted guest rootfs path before calling vminitd; this runtime talks to vminitd directly, so it freezes that same mounted rootfs path explicitly, copies the root ext4 image on the host, and thaws on both success and copy failure. `FIFREEZE` synchronizes the target filesystem before returning, so no additional guest protocol or global `sync` is required. Booted-but-not-started containers can be copied without a freeze. Attached volumes remain separate and are not folded into the exported root filesystem image.
 
-Filesystem trim remains deferred. Container 1.3.1 does not define the later runtime `clean` route or expose a `container clean` CLI, leaving no supported end-to-end surface for validating the behavior. Revisit trim when the host Container release exposes that command.
+Filesystem trim remains deferred. Container 1.4.1 defines the runtime `clean` route and exposes `container clean`, but this runtime does not implement trim yet. Add the route only with an end-to-end implementation and validation rather than returning success without reclaiming space.
 
 Multiple `allocationOnly` network attachments reuse the existing array-based allocation and helper path. Each Apple allocation gets one `vmnet-helper` backend and one libkrun NIC, appearing in guest order as `eth0`, `eth1`, and so on. Only `eth0` installs the default route and supplies fallback DNS/hostname identity; published ports continue to use the first attachment. Cleanup closes every backend and Apple network session.
 
