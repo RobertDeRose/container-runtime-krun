@@ -2,7 +2,7 @@
 set -uo pipefail
 
 RUNTIME="container-runtime-krun"
-NETWORK="krun"
+NETWORK="default"
 IMAGE="python:3.13-alpine"
 INSTALL=0
 RESULT_ROOT="validation-results"
@@ -16,7 +16,7 @@ the real Apple Container control plane.
 
 Options:
   --install          Build/install the checkout and restart Apple Container first.
-  --network NAME     Apple allocationOnly network used by the rollback probe (default: krun).
+  --network NAME     Apple allocationOnly network used by the rollback probe (default: Apple default network).
   --image IMAGE      Test image with python3 (default: python:3.13-alpine).
   --result-root DIR  Output directory (default: validation-results).
   -h, --help         Show this help.

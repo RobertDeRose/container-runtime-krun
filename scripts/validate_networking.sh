@@ -3,7 +3,8 @@ set -u
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NETWORK="krun"
+NETWORK=""
+MANAGED_NETWORK="krun"
 IMAGE="alpine:3.20"
 OUTPUT_ROOT="$REPO_ROOT/validation-results"
 INSTALL=0
@@ -13,18 +14,20 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/validate_networking.sh [options]
 
-Validate the current allocationOnly networking slice in one container and collect
-all diagnostics needed to analyze packet flow, bootstrap latency, and cleanup.
+Validate allocationOnly networking and collect diagnostics for packet flow,
+explicit network selection, bootstrap latency, and cleanup.
 
 Options:
   --install           Build/install this checkout and restart Apple Container first.
-  --network NAME      Apple Container network to use (default: krun).
+  --network NAME      Existing explicit network to use (default: Apple default network).
   --image IMAGE       Probe image (default: alpine:3.20).
   --output DIR        Result directory root (default: validation-results).
   -h, --help          Show this help.
 
-The script never creates or modifies an Apple network. Create the allocationOnly
-network separately before running it.
+Without --network, the primary probe uses Apple Container's default-network request.
+The runtime uses a compatible built-in default directly or creates/uses `krun`
+when the built-in network is incompatible. On macOS 26+, the default invocation
+also verifies explicit compatible and incompatible `--network` CLI selection.
 USAGE
 }
 
@@ -77,6 +80,11 @@ FAILED=0
 RUN_PID=""
 SAMPLER_PID=""
 BASELINE_ID=""
+SELECTION_SUFFIX="$(date -u +%Y%m%d%H%M%S)-$$"
+EXPLICIT_COMPATIBLE_CONTAINER="krun-ci-ok-$SELECTION_SUFFIX"
+EXPLICIT_INCOMPATIBLE_CONTAINER="krun-ci-bad-$SELECTION_SUFFIX"
+EXPLICIT_INCOMPATIBLE_NETWORK="krun-ci-bad-$SELECTION_SUFFIX"
+EXPLICIT_INCOMPATIBLE_NETWORK_CREATED=0
 
 quote_command() {
   local arg
@@ -171,6 +179,140 @@ copy_if_readable() {
   fi
 }
 
+assert_container_uses_network() {
+  local step="$1"
+  local container_id="$2"
+  local network="$3"
+  local json="$OUT/$step.json"
+  local stderr="$OUT/$step.stderr"
+  local rc
+
+  echo "==> $step"
+  container inspect "$container_id" >"$json" 2>"$stderr"
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    printf '%s=%d\n' "$step" "$rc" >>"$OUT/status.env"
+    FAILED=1
+    echo "    failed to inspect container (exit $rc)"
+    return 0
+  fi
+
+  if python3 - "$json" "$network" <<'PY_ASSERT'
+import json
+import sys
+
+path, expected = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    payload = json.load(stream)
+
+if len(payload) != 1:
+    raise SystemExit(f"expected one inspected container, got {len(payload)}")
+
+attachments = payload[0].get("configuration", {}).get("networks", [])
+actual = [item.get("network") for item in attachments]
+if actual != [expected]:
+    raise SystemExit(f"expected configured network {[expected]!r}, got {actual!r}")
+PY_ASSERT
+  then
+    printf '%s=0\n' "$step" >>"$OUT/status.env"
+  else
+    rc=$?
+    printf '%s=%d\n' "$step" "$rc" >>"$OUT/status.env"
+    FAILED=1
+    echo "    failed: container configuration did not preserve explicit network $network"
+  fi
+  return 0
+}
+
+run_explicit_network_cli_tests() {
+  local incompatible_output="$OUT/explicit_incompatible_run.txt"
+  local incompatible_rc
+  local create_rc
+
+  record_step explicit_compatible_network_inspect \
+    container network inspect "$MANAGED_NETWORK"
+  record_step explicit_compatible_run \
+    container run \
+      --name "$EXPLICIT_COMPATIBLE_CONTAINER" \
+      --runtime "$RUNTIME" \
+      --network "$MANAGED_NETWORK" \
+      "$IMAGE" true
+  assert_container_uses_network \
+    explicit_compatible_container_network \
+    "$EXPLICIT_COMPATIBLE_CONTAINER" \
+    "$MANAGED_NETWORK"
+  record_step explicit_compatible_container_delete \
+    container delete "$EXPLICIT_COMPATIBLE_CONTAINER"
+
+  echo "==> explicit_incompatible_network_create"
+  if capture explicit_incompatible_network_create \
+    container network create \
+      --plugin container-network-vmnet \
+      --option variant=reserved \
+      "$EXPLICIT_INCOMPATIBLE_NETWORK"; then
+    printf 'explicit_incompatible_network_create=0\n' >>"$OUT/status.env"
+    EXPLICIT_INCOMPATIBLE_NETWORK_CREATED=1
+  else
+    create_rc=$?
+    printf 'explicit_incompatible_network_create=%d\n' "$create_rc" >>"$OUT/status.env"
+    FAILED=1
+    echo "    failed (exit $create_rc); skipping incompatible-network run"
+    return 0
+  fi
+
+  record_step explicit_incompatible_network_inspect \
+    container network inspect "$EXPLICIT_INCOMPATIBLE_NETWORK"
+
+  {
+    printf '$'
+    quote_command container run \
+      --name "$EXPLICIT_INCOMPATIBLE_CONTAINER" \
+      --runtime "$RUNTIME" \
+      --network "$EXPLICIT_INCOMPATIBLE_NETWORK" \
+      "$IMAGE" true
+    container run \
+      --name "$EXPLICIT_INCOMPATIBLE_CONTAINER" \
+      --runtime "$RUNTIME" \
+      --network "$EXPLICIT_INCOMPATIBLE_NETWORK" \
+      "$IMAGE" true
+    incompatible_rc=$?
+    printf '\nexit_status=%d\n' "$incompatible_rc"
+  } >"$incompatible_output" 2>&1
+
+  if [[ "$incompatible_rc" -eq 0 ]]; then
+    echo "explicit incompatible network unexpectedly succeeded" >>"$incompatible_output"
+    printf 'explicit_incompatible_run=1\n' >>"$OUT/status.env"
+    FAILED=1
+  elif ! grep -Fq \
+    "network $EXPLICIT_INCOMPATIBLE_NETWORK is incompatible with container-runtime-krun" \
+    "$incompatible_output"; then
+    echo "missing actionable incompatible-network error" >>"$incompatible_output"
+    printf 'explicit_incompatible_run=1\n' >>"$OUT/status.env"
+    FAILED=1
+  elif ! grep -Fq 'expected plugin container-network-vmnet, mode nat, and option variant=allocationOnly' \
+    "$incompatible_output"; then
+    echo "missing expected compatibility requirements" >>"$incompatible_output"
+    printf 'explicit_incompatible_run=1\n' >>"$OUT/status.env"
+    FAILED=1
+  elif ! grep -Fq 'variant reserved' "$incompatible_output"; then
+    echo "missing discovered incompatible variant" >>"$incompatible_output"
+    printf 'explicit_incompatible_run=1\n' >>"$OUT/status.env"
+    FAILED=1
+  else
+    printf 'explicit_incompatible_run=0\n' >>"$OUT/status.env"
+  fi
+
+  capture explicit_incompatible_container_inspect \
+    container inspect "$EXPLICIT_INCOMPATIBLE_CONTAINER" || true
+  if container inspect "$EXPLICIT_INCOMPATIBLE_CONTAINER" >/dev/null 2>&1; then
+    record_step explicit_incompatible_container_delete \
+      container delete "$EXPLICIT_INCOMPATIBLE_CONTAINER"
+  fi
+  record_step explicit_incompatible_network_delete \
+    container network delete "$EXPLICIT_INCOMPATIBLE_NETWORK"
+  EXPLICIT_INCOMPATIBLE_NETWORK_CREATED=0
+}
+
 on_interrupt() {
   echo "interrupted; attempting best-effort cleanup" >&2
   if [[ -n "$SAMPLER_PID" ]]; then
@@ -185,6 +327,13 @@ on_interrupt() {
     container stop "$BASELINE_ID" >/dev/null 2>&1 || true
     container delete "$BASELINE_ID" >/dev/null 2>&1 || true
   fi
+  container stop "$EXPLICIT_COMPATIBLE_CONTAINER" >/dev/null 2>&1 || true
+  container delete "$EXPLICIT_COMPATIBLE_CONTAINER" >/dev/null 2>&1 || true
+  container stop "$EXPLICIT_INCOMPATIBLE_CONTAINER" >/dev/null 2>&1 || true
+  container delete "$EXPLICIT_INCOMPATIBLE_CONTAINER" >/dev/null 2>&1 || true
+  if [[ "$EXPLICIT_INCOMPATIBLE_NETWORK_CREATED" -eq 1 ]]; then
+    container network delete "$EXPLICIT_INCOMPATIBLE_NETWORK" >/dev/null 2>&1 || true
+  fi
   exit 130
 }
 trap on_interrupt INT TERM
@@ -192,10 +341,22 @@ trap on_interrupt INT TERM
 cd "$REPO_ROOT"
 : >"$OUT/status.env"
 
+DEFAULT_EFFECTIVE_NETWORK="default"
+MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
+if [[ "$MACOS_MAJOR" =~ ^[0-9]+$ ]] && ((MACOS_MAJOR >= 26)); then
+  DEFAULT_EFFECTIVE_NETWORK="$MANAGED_NETWORK"
+fi
+if [[ -z "$NETWORK" || "$NETWORK" == "default" ]]; then
+  EFFECTIVE_NETWORK="$DEFAULT_EFFECTIVE_NETWORK"
+else
+  EFFECTIVE_NETWORK="$NETWORK"
+fi
+
 {
   echo "timestamp_utc=$TIMESTAMP"
   echo "container_id=$CONTAINER_ID"
-  echo "network=$NETWORK"
+  echo "network=${NETWORK:-<default>}"
+  echo "effective_network=$EFFECTIVE_NETWORK"
   echo "image=$IMAGE"
   echo "runtime=$RUNTIME"
   echo "install_requested=$INSTALL"
@@ -212,7 +373,12 @@ record_step git_head git rev-parse HEAD
 record_step git_status git status --short --branch
 record_step brew_dependencies brew list --versions llvm lld xz vmnet-helper
 record_step system_status_before container system status --format json
-record_step network_inspect_before container network inspect "$NETWORK"
+if [[ -n "$NETWORK" ]]; then
+  record_step network_inspect_before container network inspect "$NETWORK"
+else
+  capture builtin_network_inspect_before container network inspect default || true
+  capture managed_network_inspect_before container network inspect "$MANAGED_NETWORK" || true
+fi
 record_step mise_doctor mise run doctor
 record_step mise_check mise run check
 record_step mise_test mise run test
@@ -276,7 +442,7 @@ if [[ -n "$INSTALL_ROOT" ]]; then
   } >"$OUT/installed-plugin.txt"
 fi
 
-if ! container network inspect "$NETWORK" >/dev/null 2>&1; then
+if [[ -n "$NETWORK" ]] && ! container network inspect "$NETWORK" >/dev/null 2>&1; then
   echo "network '$NETWORK' is unavailable; skipping the packet-flow run" | tee "$OUT/network-run-skipped.txt"
   FAILED=1
 else
@@ -306,13 +472,23 @@ PROBE
   START_NS="$(monotonic_ns)"
   START_WALL="$(date '+%Y-%m-%dT%H:%M:%S%z')"
   {
-    printf '$ container run --name %q --runtime %q --network %q %q sh -euxc <probe>\n' \
-      "$CONTAINER_ID" "$RUNTIME" "$NETWORK" "$IMAGE"
-    container run \
-      --name "$CONTAINER_ID" \
-      --runtime "$RUNTIME" \
-      --network "$NETWORK" \
-      "$IMAGE" sh -euxc "$GUEST_PROBE"
+    printf '$'
+    if [[ -n "$NETWORK" ]]; then
+      quote_command container run --name "$CONTAINER_ID" --runtime "$RUNTIME" \
+        --network "$NETWORK" "$IMAGE" sh -euxc '<probe>'
+      container run \
+        --name "$CONTAINER_ID" \
+        --runtime "$RUNTIME" \
+        --network "$NETWORK" \
+        "$IMAGE" sh -euxc "$GUEST_PROBE"
+    else
+      quote_command container run --name "$CONTAINER_ID" --runtime "$RUNTIME" \
+        "$IMAGE" sh -euxc '<probe>'
+      container run \
+        --name "$CONTAINER_ID" \
+        --runtime "$RUNTIME" \
+        "$IMAGE" sh -euxc "$GUEST_PROBE"
+    fi
   } >"$OUT/network-run.txt" 2>&1 &
   RUN_PID=$!
   sample_runtime "$RUN_PID" "$OUT/runtime-state-live.txt" &
@@ -343,7 +519,7 @@ PY
 
   record_step container_inspect_after_run container inspect "$CONTAINER_ID"
   capture container_logs_after_run container logs "$CONTAINER_ID" || true
-  record_step network_inspect_after_run container network inspect "$NETWORK"
+  record_step network_inspect_after_run container network inspect "$EFFECTIVE_NETWORK"
 
   if [[ -n "$APP_ROOT" ]]; then
     BUNDLE_ROOT="$APP_ROOT/containers/$CONTAINER_ID"
@@ -372,7 +548,7 @@ PY
   done
   capture_runtime_state "$OUT/runtime-state-after-delete.txt"
 
-  record_step network_inspect_after_delete container network inspect "$NETWORK"
+  record_step network_inspect_after_delete container network inspect "$EFFECTIVE_NETWORK"
 
   # Compare against the same runtime with networking explicitly disabled. This
   # distinguishes libkrun/vminitd startup cost from network-specific startup cost.
@@ -426,6 +602,18 @@ PY
   done
   capture_runtime_state "$OUT/runtime-state-final.txt"
 
+  if [[ -z "$NETWORK" || "$NETWORK" == "default" ]]; then
+    if [[ "$MACOS_MAJOR" =~ ^[0-9]+$ ]] && ((MACOS_MAJOR >= 26)); then
+      run_explicit_network_cli_tests
+    else
+      echo "explicit custom network CLI selection requires macOS 26 or newer" \
+        >"$OUT/explicit-network-selection-skipped.txt"
+    fi
+  else
+    echo "explicit CLI selection subtests require the primary default-network probe" \
+      >"$OUT/explicit-network-selection-skipped.txt"
+  fi
+
   # Runtime service logs use Apple's normal per-plugin log root when configured.
   if [[ -n "$LOG_ROOT" ]]; then
     RUNTIME_LOG="$LOG_ROOT/container-runtime-krun-$CONTAINER_ID.log"
@@ -435,17 +623,22 @@ PY
 fi
 
 # Capture Apple Container's own service view as supporting lifecycle/allocation evidence.
+CONTAINER_LOG_PATTERN="${CONTAINER_ID}|${BASELINE_ID:-__no_baseline__}"
+CONTAINER_LOG_PATTERN="${CONTAINER_LOG_PATTERN}|${EXPLICIT_COMPATIBLE_CONTAINER}|${EXPLICIT_INCOMPATIBLE_CONTAINER}"
+NETWORK_LOG_PATTERN="${CONTAINER_LOG_PATTERN}|\[id=${EFFECTIVE_NETWORK}\]|\[id=${MANAGED_NETWORK}\]"
+NETWORK_LOG_PATTERN="${NETWORK_LOG_PATTERN}|\[id=${EXPLICIT_INCOMPATIBLE_NETWORK}\]"
+
 capture system_logs container system logs --debug --last 5m || true
 if [[ -r "$OUT/system_logs.txt" ]]; then
-  grep -E "${CONTAINER_ID}|${BASELINE_ID:-__no_baseline__}" "$OUT/system_logs.txt" \
+  grep -E "$CONTAINER_LOG_PATTERN" "$OUT/system_logs.txt" \
     >"$OUT/system-logs-container.txt" 2>/dev/null || true
   grep -E 'allocated attachment|released session' "$OUT/system_logs.txt" \
-    | grep -E "${CONTAINER_ID}|${BASELINE_ID:-__no_baseline__}|\[id=${NETWORK}\]" \
+    | grep -E "$NETWORK_LOG_PATTERN" \
     >"$OUT/system-network-lifecycle.txt" 2>/dev/null || true
 fi
 if [[ -r "$OUT/system_logs.txt" ]]; then
   grep 'runtime lifecycle' "$OUT/system_logs.txt" \
-    | grep -E "${CONTAINER_ID}|${BASELINE_ID:-__no_baseline__}" \
+    | grep -E "$CONTAINER_LOG_PATTERN" \
     >"$OUT/lifecycle.txt" 2>/dev/null || true
 elif [[ -r "$OUT/runtime-plugin.log" ]]; then
   grep 'runtime lifecycle' "$OUT/runtime-plugin.log" >"$OUT/lifecycle.txt" 2>/dev/null || true
@@ -482,6 +675,8 @@ fi
   echo "  system-network-lifecycle.txt    Apple allocation/release log events"
   echo "  runtime-state-live.txt          runtime/helper/socket samples while running"
   echo "  runtime-state-after-delete.txt  post-delete leak check"
+  echo "  explicit_compatible_run.txt     explicit managed-network CLI success"
+  echo "  explicit_incompatible_run.txt   actionable rejection of reserved CLI network"
   echo "  mise_check.txt / mise_test.txt  repository validation"
 } >"$OUT/SUMMARY.txt"
 

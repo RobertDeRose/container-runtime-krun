@@ -190,11 +190,30 @@ if "networkAttachments: networkResources.attachments" not in bootstrap_body:
     raise SystemExit(1)
 
 
+network_policy = (ROOT / "Sources/KrunRuntimeCore/KrunNetworkPolicy.swift").read_text()
+for required in (
+    'managedDefaultNetworkName = "krun"',
+    'supportedPlugin = "container-network-vmnet"',
+    'supportedVariant = "allocationOnly"',
+    r'192.168.\(thirdOctet).0/24',
+):
+    if required not in network_policy:
+        print(f"network policy is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+for required in (
+    "ContainerAPIClient.NetworkClient.defaultNetworkName",
+    "ensureManagedDefaultNetwork",
+    "validateCompatible",
+):
+    if required not in runtime_service:
+        print(f"runtime networking is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 vmnet_backend = (ROOT / "Sources/KrunRuntimeCore/KrunVMNetBackend.swift").read_text()
 for required in (
     'case "allocationOnly"',
     'case "reserved"',
-    'variant=allocationOnly',
     '"--operation-mode", "shared"',
     '"--enable-isolation"',
 ):

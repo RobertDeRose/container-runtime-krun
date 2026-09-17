@@ -72,6 +72,7 @@ let package = Package(
         "KrunRuntimeCore",
         "KrunVMMProtocol",
         .product(name: "ContainerResource", package: "container"),
+        .product(name: "ContainerizationExtras", package: "containerization"),
         .product(name: "ContainerizationOCI", package: "containerization"),
         .product(name: "SystemPackage", package: "swift-system"),
       ]

@@ -2,7 +2,7 @@
 set -uo pipefail
 
 RUNTIME="container-runtime-krun"
-NETWORK="krun"
+NETWORK="default"
 IMAGE="alpine:3.20"
 INSTALL=0
 CYCLES=5
@@ -18,7 +18,7 @@ v0.2 allocationOnly network enabled.
 
 Options:
   --install                   Build/install the current checkout and restart Apple Container.
-  --network NAME              Apple allocationOnly network to use (default: krun).
+  --network NAME              Apple allocationOnly network to use (default: Apple default network).
   --image IMAGE               Test image (default: alpine:3.20).
   --cycles N                  Repeated create/delete cycles (default: 5).
   --memory-observe-seconds N  Host observation after releasing 1 GiB (default: 120).

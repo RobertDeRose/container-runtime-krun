@@ -26,20 +26,13 @@ This validates plugin launch, runtime XPC bootstrap, libkrun boot, vminitd, root
 
 ## Gate 3: allocation-only networking
 
-Create a dedicated non-overlapping Apple network using the `allocationOnly` variant once:
-
-```bash
-container network create \
-  --subnet 192.168.200.0/24 \
-  --option variant=allocationOnly \
-  krun
-```
-
-Choose another private subnet if that range overlaps an existing network. Then run the repository validation collector:
+Run the repository validation collector without pre-creating a network:
 
 ```bash
 scripts/validate_networking.sh --install
 ```
+
+The networked probe intentionally omits `--network`. Apple Container therefore requests its built-in `default` network. The runtime must use that resource directly when it is already compatible; on macOS 26, where the built-in default is `reserved`, it must create or reuse its managed `krun` allocation-only network through Apple Container's network API before allocation.
 
 `--install` builds and installs the current checkout, restarts Apple Container, and runs `mise run doctor`, `mise run check`, and `mise run test`. The guest probe validates the interface, route, gateway, outbound IPv4 connectivity, resolver configuration, and DNS resolution. After that run is cleaned up, the collector performs one `--network none` baseline boot so network-specific startup cost can be separated from libkrun/vminitd startup cost.
 
@@ -65,7 +58,9 @@ Do not reduce readiness timeouts based only on total command duration. Use `life
 
 The observed startup race was an early libkrun host socket connection arriving shortly before vminitd began serving gRPC in the guest. A single doomed gRPC readiness call previously held the retry loop for roughly five seconds. Readiness now retains the 30-second overall deadline and still requires a successful real vminitd RPC, while each probe has a 250 ms RPC deadline so an early stale connection can be discarded and retried. The validated networked bootstrap returned to the low-single-second range without weakening readiness.
 
-The script does not create, modify, or replace Apple network allocations. It expects the named network to already exist and leaves Apple `container-network-vmnet` authoritative for IPAM and allocation lifetime.
+The script records both the built-in `default` resource and the managed `krun` resource before the run. On macOS 26 it verifies that `krun` is available afterward; on older systems the compatible built-in default remains the effective resource. Apple `container-network-vmnet` remains authoritative for the actual network service, IPAM, and attachment lifetime. Passing `--network NAME` switches the primary probe to an existing explicit network.
+
+With the normal default-network invocation on macOS 26 or newer, the collector also exercises explicit CLI selection end to end. It reruns a container with `--network krun` and verifies the persisted container configuration contains exactly that requested network. It then creates an ephemeral `reserved` vmnet network and verifies `container run --network <name>` fails with the runtime's actionable compatibility error naming the network and the required `container-network-vmnet`/NAT/`allocationOnly` contract. The temporary incompatible network is deleted before the collector exits.
 
 ## Gate 4: networked lifecycle regression
 

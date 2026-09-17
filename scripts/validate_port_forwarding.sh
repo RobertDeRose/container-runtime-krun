@@ -2,7 +2,7 @@
 set -uo pipefail
 
 RUNTIME="container-runtime-krun"
-NETWORK="krun"
+NETWORK="default"
 IMAGE="alpine:3.20"
 INSTALL=0
 RESULT_ROOT="validation-results"
@@ -15,7 +15,7 @@ Validate v0.2 TCP/UDP published-port forwarding through Apple's SocketForwarder.
 
 Options:
   --install          Build/install the checkout and restart Apple Container.
-  --network NAME     Apple allocationOnly network to use (default: krun).
+  --network NAME     Apple allocationOnly network to use (default: Apple default network).
   --image IMAGE      Test image (default: alpine:3.20).
   --result-root DIR  Output directory (default: validation-results).
   -h, --help         Show this help.
@@ -481,7 +481,7 @@ container system logs --debug --last 10m >"$RESULT_DIR/system-logs-container.txt
 grep -E "$MAIN_ID|$FAIL_ID|NetworkVmnetHelper|creating port forwarder|closing forwarder|closed forwarder" \
   "$RESULT_DIR/system-logs-container.txt" >"$RESULT_DIR/system-logs-relevant.txt" 2>/dev/null || true
 ALLOCATIONS="$(grep -Ec "allocated attachment.*hostname=(${MAIN_ID}|${FAIL_ID})" "$RESULT_DIR/system-logs-container.txt" 2>/dev/null || true)"
-RELEASES="$(grep -Ec "NetworkVmnetHelper.*released session.*id=${NETWORK}" "$RESULT_DIR/system-logs-container.txt" 2>/dev/null || true)"
+RELEASES="$(grep -Ec "NetworkVmnetHelper.*released session.*id=(${NETWORK}|krun)" "$RESULT_DIR/system-logs-container.txt" 2>/dev/null || true)"
 {
   echo "test_allocations=$ALLOCATIONS"
   echo "recent_network_releases=$RELEASES"
