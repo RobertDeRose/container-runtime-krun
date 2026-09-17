@@ -24,6 +24,7 @@ routes = {
     "copyIn",
     "copyOut",
     "snapshotDisk",
+    "clean",
 }
 wired = set(re.findall(r"RuntimeRoutes\.([A-Za-z0-9_]+)\.rawValue", main))
 wired.discard("createEndpoint")
@@ -188,6 +189,33 @@ if "prepareNetworking(" not in bootstrap_body:
 if "networkAttachments: networkResources.attachments" not in bootstrap_body:
     print("VM boot must receive allocated network attachments", file=sys.stderr)
     raise SystemExit(1)
+
+for required in (
+    "prepareContainerLog(bundle.containerLog)",
+    "KrunProcessLog(path: controller.bundle.containerLog)",
+    "processLog: processLog",
+):
+    if required not in runtime_service:
+        print(f"persistent container logging is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+clean_match = re.search(
+    r"public func clean\(_ message: XPCMessage\) async throws -> XPCMessage \{(?P<body>.*?)\n  \}",
+    runtime_service,
+    re.DOTALL,
+)
+if clean_match is None:
+    print("could not locate clean route", file=sys.stderr)
+    raise SystemExit(1)
+clean_body = clean_match.group("body")
+for required in (
+    "KrunCleanPolicy.targets(for: config)",
+    "operation: .trim",
+    "containerID: config.id",
+):
+    if required not in clean_body:
+        print(f"clean route is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 network_policy = (ROOT / "Sources/KrunRuntimeCore/KrunNetworkPolicy.swift").read_text()

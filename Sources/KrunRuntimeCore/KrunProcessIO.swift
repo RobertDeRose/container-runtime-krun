@@ -48,6 +48,32 @@ public actor KrunPortPool {
   }
 }
 
+actor KrunProcessLog {
+  private var handle: FileHandle?
+
+  init(path: URL) throws {
+    let handle = try FileHandle(forWritingTo: path)
+    _ = try handle.seekToEnd()
+    self.handle = handle
+  }
+
+  func write(_ data: Data) {
+    guard let handle else { return }
+    do {
+      try handle.write(contentsOf: data)
+    } catch {
+      try? handle.close()
+      self.handle = nil
+    }
+  }
+
+  func close() {
+    guard let handle else { return }
+    try? handle.close()
+    self.handle = nil
+  }
+}
+
 public final class KrunProcessIO: @unchecked Sendable {
   public let stdinPort: UInt32?
   public let stdoutPort: UInt32?
@@ -56,6 +82,7 @@ public final class KrunProcessIO: @unchecked Sendable {
   private let pool: KrunPortPool
   private let leases: [KrunPortPool.Lease]
   private let hostHandles: [FileHandle?]
+  private let processLog: KrunProcessLog?
   private let listeners: [Socket?]
   private let accepts: [Task<FileHandle?, Error>]
   private var guestHandles = [FileHandle?](repeating: nil, count: 3)
@@ -66,6 +93,7 @@ public final class KrunProcessIO: @unchecked Sendable {
     pool: KrunPortPool,
     leases: [KrunPortPool.Lease],
     hostHandles: [FileHandle?],
+    processLog: KrunProcessLog?,
     listeners: [Socket?],
     accepts: [Task<FileHandle?, Error>],
     ports: [UInt32?]
@@ -73,6 +101,7 @@ public final class KrunProcessIO: @unchecked Sendable {
     self.pool = pool
     self.leases = leases
     self.hostHandles = hostHandles
+    self.processLog = processLog
     self.listeners = listeners
     self.accepts = accepts
     self.stdinPort = ports[0]
@@ -85,6 +114,20 @@ public final class KrunProcessIO: @unchecked Sendable {
     terminal: Bool,
     pool: KrunPortPool
   ) async throws -> KrunProcessIO {
+    try await prepare(
+      hostHandles: inputHandles,
+      terminal: terminal,
+      pool: pool,
+      processLog: nil
+    )
+  }
+
+  static func prepare(
+    hostHandles inputHandles: [FileHandle?],
+    terminal: Bool,
+    pool: KrunPortPool,
+    processLog: KrunProcessLog?
+  ) async throws -> KrunProcessIO {
     var hostHandles = [FileHandle?](repeating: nil, count: 3)
     for i in 0..<min(inputHandles.count, 3) {
       hostHandles[i] = inputHandles[i]
@@ -94,8 +137,19 @@ public final class KrunProcessIO: @unchecked Sendable {
         .invalidArgument, message: "stderr cannot be separate when terminal=true")
     }
 
-    let needed = hostHandles.compactMap { $0 }.count
-    let leases = try await pool.take(needed)
+    let needsStream = [
+      hostHandles[0] != nil,
+      hostHandles[1] != nil || processLog != nil,
+      !terminal && (hostHandles[2] != nil || processLog != nil),
+    ]
+    let needed = needsStream.filter { $0 }.count
+    let leases: [KrunPortPool.Lease]
+    do {
+      leases = try await pool.take(needed)
+    } catch {
+      await processLog?.close()
+      throw error
+    }
     var leaseIndex = 0
     var ports = [UInt32?](repeating: nil, count: 3)
     var listeners = [Socket?](repeating: nil, count: 3)
@@ -103,7 +157,7 @@ public final class KrunProcessIO: @unchecked Sendable {
 
     do {
       for index in 0..<3 {
-        guard hostHandles[index] != nil else {
+        guard needsStream[index] else {
           accepts.append(Task { nil })
           continue
         }
@@ -142,6 +196,7 @@ public final class KrunProcessIO: @unchecked Sendable {
       for listener in listeners.compactMap({ $0 }) {
         try? listener.close()
       }
+      await processLog?.close()
       await pool.put(leases)
       throw error
     }
@@ -150,6 +205,7 @@ public final class KrunProcessIO: @unchecked Sendable {
       pool: pool,
       leases: leases,
       hostHandles: hostHandles,
+      processLog: processLog,
       listeners: listeners,
       accepts: accepts,
       ports: ports
@@ -178,13 +234,24 @@ public final class KrunProcessIO: @unchecked Sendable {
       }
     }
     for index in 1...2 {
-      guard let host = hostHandles[index], let guest = guestHandles[index] else { continue }
+      guard let guest = guestHandles[index] else { continue }
+      let host = hostHandles[index]
+      let processLog = processLog
       outputTasks.append(
         Task {
+          var hostWritable = host != nil
           for await data in Self.stream(guest) {
-            do {
-              try host.write(contentsOf: data)
-            } catch {
+            if let host, hostWritable {
+              do {
+                try host.write(contentsOf: data)
+              } catch {
+                hostWritable = false
+              }
+            }
+            if let processLog {
+              await processLog.write(data)
+            }
+            if !hostWritable && processLog == nil {
               break
             }
           }
@@ -200,6 +267,7 @@ public final class KrunProcessIO: @unchecked Sendable {
     for index in 1...2 {
       try? hostHandles[index]?.close()
     }
+    await processLog?.close()
   }
 
   static func waitForOutputTasks(_ tasks: [Task<Void, Never>], timeout: Duration) async {
@@ -231,6 +299,9 @@ public final class KrunProcessIO: @unchecked Sendable {
     for task in outputTasks {
       task.cancel()
     }
+    for task in accepts {
+      task.cancel()
+    }
     for handle in guestHandles.compactMap({ $0 }) {
       handle.readabilityHandler = nil
       try? handle.close()
@@ -239,6 +310,7 @@ public final class KrunProcessIO: @unchecked Sendable {
       handle.readabilityHandler = nil
       try? handle.close()
     }
+    await processLog?.close()
     for listener in listeners.compactMap({ $0 }) {
       try? listener.close()
     }

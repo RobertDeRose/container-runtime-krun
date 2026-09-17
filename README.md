@@ -28,7 +28,8 @@ v0.4.0 establishes the lifecycle, networking, host-integration, and selected par
 | Arbitrary runtime `dial(port)` | no |
 | `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
 | Disk snapshot / export | yes, live rootfs export |
-| Filesystem trim / `container clean` | no, deferred until the installed Container CLI exposes the command |
+| Persistent `container logs` | yes, init stdout/stderr plus VM boot log |
+| Filesystem trim / `container clean` | yes, writable rootfs and block-backed mounts |
 | Rosetta | no, intentionally deferred; use Apple's official runtime for x86_64 emulation |
 | Nested virtualization | no |
 | SSH agent forwarding | yes, reverse fixed-vsock relay from host `SSH_AUTH_SOCK` |
@@ -226,4 +227,4 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
 The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
 
-v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. v0.5 development adds live rootfs snapshot/export, multiple allocation-only attachments, and a non-gating comparison harness against Apple's default runtime. `container clean` remains deferred; Container 1.4.1 exposes the route, but this runtime has not implemented filesystem trim yet. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.
+v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. Current development adds live rootfs snapshot/export, multiple allocation-only attachments, persistent `container logs`, filesystem trim through `container clean`, and a non-gating comparison harness against Apple's default runtime. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.

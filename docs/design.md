@@ -201,7 +201,9 @@ Rosetta is deliberately excluded from the active roadmap. If x86_64 emulation is
 
 Live export follows Apple's Container 1.4.1 runtime contract. Containerization 0.45 translates the container-relative `/` freeze request to the mounted guest rootfs path before calling vminitd; this runtime talks to vminitd directly, so it freezes that same mounted rootfs path explicitly, copies the root ext4 image on the host, and thaws on both success and copy failure. `FIFREEZE` synchronizes the target filesystem before returning, so no additional guest protocol or global `sync` is required. Booted-but-not-started containers can be copied without a freeze. Attached volumes remain separate and are not folded into the exported root filesystem image.
 
-Filesystem trim remains deferred. Container 1.4.1 defines the runtime `clean` route and exposes `container clean`, but this runtime does not implement trim yet. Add the route only with an end-to-end implementation and validation rather than returning success without reclaiming space.
+Container 1.4.1 filesystem cleaning is implemented through the runtime `clean` route. The runtime asks vminitd to trim `/` when the rootfs is writable and each writable block-backed mount at its container destination. Read-only filesystems are skipped, and any trim failure is returned to the caller rather than reporting a false success.
+
+The init process always has stdout/stderr connected to a serialized bundle log sink, including detached containers. Attached output is teed to both the caller and the persistent log; exec-process output remains live-only. Apple Container continues to own the `container logs` surface and combines this `stdio.log` with the existing VM boot log.
 
 Multiple `allocationOnly` network attachments reuse the existing array-based allocation and helper path. Each Apple allocation gets one `vmnet-helper` backend and one libkrun NIC, appearing in guest order as `eth0`, `eth1`, and so on. Only `eth0` installs the default route and supplies fallback DNS/hostname identity; published ports continue to use the first attachment. Cleanup closes every backend and Apple network session.
 

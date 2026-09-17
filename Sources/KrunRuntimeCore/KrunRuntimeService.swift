@@ -83,6 +83,7 @@ public actor KrunRuntimeService {
     let dynamicEnv = try message.dynamicEnvironment()
 
     let bundle = try ensureBundle()
+    try Self.prepareContainerLog(bundle.containerLog)
     let containerConfig = try bundle.configuration
     try KrunFeatureGate.validate(containerConfig)
     let networkResources = try await prepareNetworking(
@@ -193,10 +194,12 @@ public actor KrunRuntimeService {
     }
 
     let isInit = id == containerConfig.id
+    let processLog = isInit ? try KrunProcessLog(path: controller.bundle.containerLog) : nil
     let io = try await KrunProcessIO.prepare(
       hostHandles: record.hostStdio,
       terminal: record.configuration.terminal,
-      pool: pool
+      pool: pool,
+      processLog: processLog
     )
     KrunLifecycleTrace.mark(
       log,
@@ -429,6 +432,11 @@ public actor KrunRuntimeService {
           id: config.id, containerID: config.id, signal: Signal.kill.rawValue)
         _ = try await controller.agent.waitProcess(id: config.id, containerID: config.id)
       }
+      // Let the process-owned wait task drain stdout/stderr into live handles and
+      // the persistent bundle log before VM cleanup closes the stdio mappings.
+      if let waitTask = processes[config.id]?.waitTask {
+        _ = try? await waitTask.value
+      }
     }
     await cleanupContainer()
     return message.reply()
@@ -495,6 +503,45 @@ public actor KrunRuntimeService {
       destination: URL(fileURLWithPath: destinationPath),
       createParents: message.bool(key: RuntimeKeys.createParents.rawValue)
     )
+    return message.reply()
+  }
+
+
+  @Sendable
+  public func clean(_ message: XPCMessage) async throws -> XPCMessage {
+    guard state == .running else {
+      throw ContainerizationError(.invalidState, message: "cannot clean: container is not running")
+    }
+    guard message.string(key: RuntimeKeys.id.rawValue) != nil else {
+      throw ContainerizationError(.invalidArgument, message: "no id supplied for clean")
+    }
+    guard let controller = vm, let config else {
+      throw ContainerizationError(.invalidState, message: "runtime is not booted")
+    }
+
+    var failures: [String] = []
+    for path in KrunCleanPolicy.targets(for: config) {
+      do {
+        try await controller.agent.filesystemOperation(
+          operation: .trim,
+          path: path,
+          containerID: config.id
+        )
+      } catch {
+        log.error(
+          "failed to clean mount",
+          metadata: ["path": "\(path)", "error": "\(error)"]
+        )
+        failures.append("\(path) (\(error))")
+      }
+    }
+
+    guard failures.isEmpty else {
+      throw ContainerizationError(
+        .internalError,
+        message: "failed to clean mounts in \(config.id): \(failures.joined(separator: ", "))"
+      )
+    }
     return message.reply()
   }
 
@@ -951,6 +998,25 @@ public actor KrunRuntimeService {
     for waiter in waiters {
       waiter.resume()
     }
+  }
+
+
+  private static func prepareContainerLog(_ path: URL) throws {
+    if !FileManager.default.fileExists(atPath: path.path) {
+      guard FileManager.default.createFile(
+        atPath: path.path,
+        contents: nil,
+        attributes: [.posixPermissions: 0o644]
+      ) else {
+        throw ContainerizationError(
+          .internalError,
+          message: "failed to create container log at \(path.path)"
+        )
+      }
+    }
+    let handle = try FileHandle(forWritingTo: path)
+    try handle.truncate(atOffset: 0)
+    try handle.close()
   }
 
   private func ensureBundle() throws -> ContainerResource.Bundle {
