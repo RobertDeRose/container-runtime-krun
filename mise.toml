@@ -138,9 +138,18 @@ fetch_repo={{ vars.LIBKRUN_REPO | quote }}
 
 mkdir -p "$plugin_dir/bin" "$plugin_dir/lib" "$plugin_dir/share/licenses/libkrun"
 cp "$MISE_PROJECT_ROOT/plugin/container-runtime-krun/config.toml" "$plugin_dir/config.toml"
-cp "$build_dir/container-runtime-krun" "$plugin_dir/bin/container-runtime-krun"
-cp "$build_dir/container-krun-vmm-helper" "$plugin_dir/bin/container-krun-vmm-helper"
-cp "$libkrun_dylib" "$plugin_dir/lib/libkrun.dylib"
+
+# Replace executable images with new inodes. macOS caches code-signature validation per inode, so
+# overwriting an already-executed Mach-O in place can leave the kernel validating stale signature data.
+stage_dir="$(mktemp -d "$plugin_dir/.install.XXXXXX")"
+trap 'rm -rf "$stage_dir"' EXIT
+cp "$build_dir/container-runtime-krun" "$stage_dir/container-runtime-krun"
+cp "$build_dir/container-krun-vmm-helper" "$stage_dir/container-krun-vmm-helper"
+cp "$libkrun_dylib" "$stage_dir/libkrun.dylib"
+mv -f "$stage_dir/container-runtime-krun" "$plugin_dir/bin/container-runtime-krun"
+mv -f "$stage_dir/container-krun-vmm-helper" "$plugin_dir/bin/container-krun-vmm-helper"
+mv -f "$stage_dir/libkrun.dylib" "$plugin_dir/lib/libkrun.dylib"
+
 cp "$libkrun_source/LICENSE" "$plugin_dir/share/licenses/libkrun/LICENSE"
 {
   echo "repository=$source_repo"
