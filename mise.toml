@@ -179,6 +179,14 @@ install_root="${INSTALL_ROOT:-$(python3 "$MISE_PROJECT_ROOT/scripts/install_root
 rm -rf "$install_root/libexec/container-plugins/container-runtime-krun"
 '''
 
+[tasks."profile:hvf-startup"]
+description = "Capture a Time Profiler trace around one krun startup"
+run = "scripts/profile_hvf_startup.sh"
+
+[tasks."profile:cpu"]
+description = "Capture paired Apple/VZ and krun CPU startup profiles"
+run = "scripts/profile_runtime_cpu.sh"
+
 [tasks.test]
 description = "Run the Swift test suite"
 run = "swift test"
