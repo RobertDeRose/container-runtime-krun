@@ -29,6 +29,13 @@ import Testing
         path: "/tmp/volume.ext4",
         readOnly: false
       )
+    ],
+    virtioFS: [
+      .init(
+        tag: "krunfs0",
+        path: "/tmp/share",
+        readOnly: true
+      )
     ]
   )
   let data = try JSONEncoder().encode(original)

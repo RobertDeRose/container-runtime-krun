@@ -82,8 +82,7 @@ RESULT_DIR="$RESULT_ROOT/gate8-${STAMP}-$$"
 ARCHIVE="$RESULT_ROOT/container-runtime-krun-gate8-${STAMP}-$$.tar.gz"
 ROUTE_ID="$PREFIX-routes"
 INITIAL_SOCKETS="$RESULT_DIR/initial-sockets.txt"
-HOST_MOUNT_DIR="$RESULT_DIR/host-mount"
-mkdir -p "$RESULT_DIR" "$HOST_MOUNT_DIR"
+mkdir -p "$RESULT_DIR"
 
 FAILURES=0
 PASSES=0
@@ -212,14 +211,6 @@ expect_unsupported() {
 
   fail "$name failed, but did not report expected boundary: $expected"
   return 1
-}
-
-absolute_path() {
-  python3 - "$1" <<'PY'
-import os
-import sys
-print(os.path.abspath(sys.argv[1]))
-PY
 }
 
 free_tcp_port() {
@@ -373,19 +364,11 @@ if ((INSTALL)); then
   expect_success system_start container system start
 fi
 
-HOST_MOUNT_DIR_ABS="$(absolute_path "$HOST_MOUNT_DIR")"
 NO_NETWORK_PORT="$(free_tcp_port)"
 
 # Configuration-time feature gates. Every command must fail with the runtime's
 # explicit unsupported message. The post-run system-log check additionally
 # verifies that no vmnet/libkrun/guest setup lifecycle event was reached.
-run_feature_gate_case \
-  host-mount \
-  "host, block, and virtiofs mounts" \
-  --network none \
-  --mount "type=bind,source=${HOST_MOUNT_DIR_ABS},target=/mnt/gate8" \
-  "$IMAGE" true
-
 run_feature_gate_case \
   rosetta \
   "Rosetta; use Apple's official runtime for x86_64 emulation" \

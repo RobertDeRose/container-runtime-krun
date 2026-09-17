@@ -120,11 +120,10 @@ The runtime uses Apple Container's public `SocketForwarder` implementation and t
 
 Verify each remaining unsupported feature produces an explicit error before VM startup where possible:
 
-- add a host bind/virtio-fs mount;
 - request Rosetta;
 - request nested virtualization.
 
-The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.4.1 has no public CLI surface for `dial`. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, `--init`, published Unix sockets, SSH forwarding, snapshot/export, logs/clean, and multiple networks are covered by dedicated gates instead.
+The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.4.1 has no public CLI surface for `dial`. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, host bind/virtio-fs mounts, `--init`, published Unix sockets, SSH forwarding, snapshot/export, logs/clean, and multiple networks are covered by dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 
@@ -212,3 +211,23 @@ scripts/validate_logs_clean.sh --install
 ```
 
 The validator starts a detached container whose init process writes distinct stdout and stderr markers, verifies `container logs` returns both while the container is running, then verifies the same persisted output remains readable after stop. It then starts a container with a writable Apple volume, creates and deletes data on both rootfs and the volume, and requires `container clean` to complete successfully. This exercises vminitd TRIM against every writable block-backed target. The container must remain usable afterward, while a stopped container must reject `container clean` in the same way as Apple's native runtime.
+
+## Gate 17: host bind / virtiofs mounts
+
+Validate host directory sharing with:
+
+```bash
+scripts/validate_virtiofs.sh --install
+```
+
+The validator starts a container with a read-write `--volume` host path, a read-only
+`--mount type=bind` host path, and an explicit read-write `--mount type=virtiofs` host path. It
+verifies host-to-guest visibility, guest-to-host writes, live host updates, read-only enforcement at
+the guest and host, multiple independent virtio-fs devices, and cleanup. It also copies files into and out
+of the read-write share through Apple Container's public `container copy` surface, proving vminitd
+path translation resolves the VM-global virtio-fs staging mount rather than the hidden rootfs path.
+A host symlink pointing outside the exposed directory is exercised as a normal guest-path smoke test.
+
+libkrun's macOS virtio-fs backend does not provide a hard confinement boundary against a malicious
+or compromised guest kernel. This gate validates normal container/VFS behavior with the stock Apple
+Container guest kernel; it does not claim to validate a hostile-kernel security boundary.
