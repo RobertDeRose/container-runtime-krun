@@ -5,10 +5,7 @@ import PackageDescription
 let containerRevision = "a9a62e28f6beb88940122a3d7b286f2d5ae8053a"
 let containerizationVersion = Version(0, 42, 0)
 let grpcSwiftVersion = Version(2, 4, 2)
-let grpcNIOTransportVersion = Version(2, 9, 0)
 let swiftNIOVersion = Version(2, 101, 3)
-let swiftNIOExtrasVersion = Version(1, 34, 3)
-let swiftNIOHTTP2Version = Version(1, 44, 0)
 let swiftSystemVersion = Version(1, 7, 4)
 
 let package = Package(
@@ -26,10 +23,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.10.1"),
     .package(url: "https://github.com/apple/swift-nio.git", exact: swiftNIOVersion),
-    .package(url: "https://github.com/apple/swift-nio-extras.git", exact: swiftNIOExtrasVersion),
-    .package(url: "https://github.com/apple/swift-nio-http2.git", exact: swiftNIOHTTP2Version),
     .package(url: "https://github.com/grpc/grpc-swift-2.git", exact: grpcSwiftVersion),
-    .package(url: "https://github.com/grpc/grpc-swift-nio-transport.git", exact: grpcNIOTransportVersion),
     .package(url: "https://github.com/apple/swift-system.git", exact: swiftSystemVersion),
   ],
   targets: [

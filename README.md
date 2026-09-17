@@ -75,6 +75,11 @@ mise run release
 mise run install
 ```
 
+The build, release, and test tasks use `--force-resolved-versions` to enforce the committed `Package.resolved`,
+including transitive dependency versions. Use the same flag with direct `swift build` or `swift test` commands.
+For an intentional dependency change, resolve or update dependencies separately, review and commit
+`Package.resolved`, then rerun validation. Do not delete the lockfile to clear build warnings.
+
 `mise run install` derives the Apple Container installation root from the resolved `container` executable. mise pins Rust 1.98.1 for the libkrun build. Override the installation root when necessary:
 
 ```bash
