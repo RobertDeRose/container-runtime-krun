@@ -171,7 +171,8 @@ public final class KrunVMController: @unchecked Sendable {
           helperLogPath: helperLogPath,
           group: group,
           log: log,
-          lifecycleStartedAt: lifecycleStartedAt
+          lifecycleStartedAt: lifecycleStartedAt,
+          initialProbeTimeoutMilliseconds: 50
         )
         cleanupAgent = agent
         try KrunUnixSocketRelays.applyHostPermissions(socketRelays)
@@ -323,7 +324,8 @@ public final class KrunVMController: @unchecked Sendable {
       helperLogPath: bundle.filePath(for: "krun-vmm.log"),
       group: eventLoopGroup,
       log: log,
-      lifecycleStartedAt: nil
+      lifecycleStartedAt: nil,
+      initialProbeTimeoutMilliseconds: 100
     )
   }
 
@@ -343,14 +345,18 @@ public final class KrunVMController: @unchecked Sendable {
     helperLogPath: URL,
     group: MultiThreadedEventLoopGroup,
     log: Logger,
-    lifecycleStartedAt: ContinuousClock.Instant?
+    lifecycleStartedAt: ContinuousClock.Instant?,
+    initialProbeTimeoutMilliseconds: Int64
   ) async throws -> Vminitd {
     let deadline = ContinuousClock.now.advanced(by: .seconds(30))
     var lastError: Error?
     var loggedTransportConnection = false
+    var probeTimeoutMilliseconds = initialProbeTimeoutMilliseconds
     var attempt = 0
     repeat {
       attempt += 1
+      // Raw UDS failures back off; stale connected probes retry more quickly.
+      var retryDelay: Duration = .milliseconds(100)
       guard helper.isRunning else {
         let log = (try? String(contentsOf: helperLogPath, encoding: .utf8)) ?? ""
         throw ContainerizationError(
@@ -390,7 +396,10 @@ public final class KrunVMController: @unchecked Sendable {
                 metadata: ["attempt": "\(attempt)"]
               )
             }
-            try await probeAgentReadiness(agent)
+            try await probeAgentReadiness(
+              agent,
+              timeoutMilliseconds: probeTimeoutMilliseconds
+            )
             if let lifecycleStartedAt {
               KrunLifecycleTrace.mark(
                 log,
@@ -412,7 +421,9 @@ public final class KrunVMController: @unchecked Sendable {
                 ]
               )
             }
+            probeTimeoutMilliseconds = 100
             try? await agent.close()
+            retryDelay = .milliseconds(20)
             throw error
           }
         } catch {
@@ -421,7 +432,7 @@ public final class KrunVMController: @unchecked Sendable {
         }
       } catch {
         lastError = error
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: retryDelay)
       }
     } while ContinuousClock.now < deadline
 
@@ -431,14 +442,17 @@ public final class KrunVMController: @unchecked Sendable {
     )
   }
 
-  private static func probeAgentReadiness(_ agent: Vminitd) async throws {
+  private static func probeAgentReadiness(
+    _ agent: Vminitd,
+    timeoutMilliseconds: Int64
+  ) async throws {
     let client = Com_Apple_Containerization_Sandbox_V3_SandboxContext.Client(
       wrapping: agent.grpcClient
     )
     var options = CallOptions.defaults
     // This bounds one probe, not guest readiness. connectAgent still allows the full
     // 30-second readiness window and still requires a successful vminitd RPC.
-    options.timeout = .milliseconds(250)
+    options.timeout = .milliseconds(timeoutMilliseconds)
     _ = try await client.containerStatistics(
       Com_Apple_Containerization_Sandbox_V3_ContainerStatisticsRequest(),
       options: options

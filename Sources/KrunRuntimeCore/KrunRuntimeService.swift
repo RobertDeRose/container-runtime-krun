@@ -197,9 +197,21 @@ public actor KrunRuntimeService {
       terminal: record.configuration.terminal,
       pool: pool
     )
+    KrunLifecycleTrace.mark(
+      log,
+      startedAt: startedAt,
+      event: "process stdio prepared",
+      metadata: ["process_id": "\(id)"]
+    )
     let processAgent: Vminitd
     do {
       processAgent = try await controller.dialAgent()
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: startedAt,
+        event: "process agent connected",
+        metadata: ["process_id": "\(id)"]
+      )
     } catch {
       await io.close()
       throw error
@@ -213,6 +225,12 @@ public actor KrunRuntimeService {
         volumeAttachments: controller.volumeAttachments,
         socketMounts: controller.socketMounts,
         wrapWithInit: isInit && containerConfig.useInit
+      )
+      KrunLifecycleTrace.mark(
+        log,
+        startedAt: startedAt,
+        event: "createProcess RPC start",
+        metadata: ["process_id": "\(id)"]
       )
       try await processAgent.createProcess(
         id: id,

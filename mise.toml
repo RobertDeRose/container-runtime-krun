@@ -6,7 +6,7 @@ rust = { version = "1.98.1", profile = "minimal" }
 [vars]
 LIBKRUN_SOURCE_REPO = "https://github.com/RobertDeRose/libkrun"
 LIBKRUN_REPO = { default = "https://github.com/RobertDeRose/libkrun.git" }
-LIBKRUN_COMMIT = "d37b5c0f72998df5cddd79ae71af4d0006f5f543"
+LIBKRUN_COMMIT = "f435571928f12558325af7435dcae8ab6f4dd814"
 LIBKRUN_UPSTREAM_BASE = "728df8125077d0db44265f6e997c72b81b65c015"
 LIBKRUN_VERSION = "1.19.4"
 LIBKRUN_FEATURES = "BLK=1 NET=1"

@@ -11,6 +11,26 @@ private struct KrunError: Error, CustomStringConvertible {
   let description: String
 }
 
+private enum HelperLifecycleTrace {
+  static func mark(
+    startedAt: ContinuousClock.Instant,
+    event: String,
+    metadata: [String: String] = [:]
+  ) {
+    let components = startedAt.duration(to: ContinuousClock.now).components
+    let elapsedMilliseconds =
+      components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000
+    var line = "helper lifecycle [event=\(event)] [elapsed_ms=\(elapsedMilliseconds)]"
+    for key in metadata.keys.sorted() {
+      if let value = metadata[key] {
+        line += " [\(key)=\(value)]"
+      }
+    }
+    line += "\n"
+    FileHandle.standardError.write(Data(line.utf8))
+  }
+}
+
 private final class KrunLibrary {
   typealias InitLog = @convention(c) (Int32, UInt32, UInt32, UInt32) -> Int32
   typealias CreateContext = @convention(c) () -> Int32
@@ -120,8 +140,9 @@ private func withCString<Result>(_ value: String, _ body: (UnsafePointer<CChar>)
   try value.withCString(body)
 }
 
-private func run(config: KrunVMMConfig) throws -> Never {
+private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) throws -> Never {
   let krun = try KrunLibrary(path: config.libkrun)
+  HelperLifecycleTrace.mark(startedAt: startedAt, event: "libkrun loaded")
   try checked(krun.initLog(-1, 3, 2, 0), "krun_init_log")
 
   let created = krun.createContext()
@@ -130,8 +151,10 @@ private func run(config: KrunVMMConfig) throws -> Never {
   }
   let context = UInt32(created)
   defer { _ = krun.freeContext(context) }
+  HelperLifecycleTrace.mark(startedAt: startedAt, event: "context created")
 
   try checked(krun.setVMConfig(context, config.cpus, config.memoryMiB), "krun_set_vm_config")
+  HelperLifecycleTrace.mark(startedAt: startedAt, event: "basic VM configuration complete")
 
   // Avoid libkrun's implicit TSI mode. Apple's stock Container kernel uses
   // ordinary virtio-vsock and already negotiates free-page reporting.
@@ -145,6 +168,11 @@ private func run(config: KrunVMMConfig) throws -> Never {
       )
     }
   }
+  HelperLifecycleTrace.mark(
+    startedAt: startedAt,
+    event: "vsock mappings registered",
+    metadata: ["mapping_count": "\(config.vsockMappings.count)"]
+  )
 
   for (index, network) in config.networks.enumerated() {
     guard network.macAddress.count == 6 else {
@@ -219,7 +247,9 @@ private func run(config: KrunVMMConfig) throws -> Never {
       try checked(krun.setKernel(context, kernel, 0, nil, commandLine), "krun_set_kernel")
     }
   }
+  HelperLifecycleTrace.mark(startedAt: startedAt, event: "device configuration complete")
 
+  HelperLifecycleTrace.mark(startedAt: startedAt, event: "krun_start_enter start")
   let result = krun.startEnter(context)
   throw KrunError(description: "krun_start_enter unexpectedly returned \(result)")
 }
@@ -231,11 +261,13 @@ private enum Main {
       guard CommandLine.arguments.count == 2 else {
         throw KrunError(description: "usage: container-krun-vmm-helper CONFIG.json")
       }
+      let startedAt = ContinuousClock.now
+      HelperLifecycleTrace.mark(startedAt: startedAt, event: "helper start")
       let config = try JSONDecoder().decode(
         KrunVMMConfig.self,
         from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
       )
-      try run(config: config)
+      try run(config: config, startedAt: startedAt)
     } catch {
       FileHandle.standardError.write(Data("container-krun-vmm-helper: \(error)\n".utf8))
       exit(1)
