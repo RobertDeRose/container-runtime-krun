@@ -36,7 +36,7 @@ enum KrunCopyOperations {
     if resolvedDestination.readOnly {
       throw ContainerizationError(
         .invalidArgument,
-        message: "copyIn: destination is on a read-only volume mount: \(destination.path)"
+        message: "copyIn: destination is on a read-only mount: \(destination.path)"
       )
     }
     let guestPath = try await resolveCopyInGuestPath(

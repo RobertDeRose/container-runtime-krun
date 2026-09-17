@@ -118,8 +118,11 @@ enum KrunVolumeLayout {
             options: ["bind"] + filesystem.options
           )
         )
-      case .block, .virtiofs:
-        throw KrunFeatureGate.unsupported("host, block, and virtiofs mounts")
+      case .virtiofs:
+        // Host shares are prepared independently by KrunVirtioFSLayout.
+        continue
+      case .block:
+        throw KrunFeatureGate.unsupported("direct block-device mounts")
       }
     }
 

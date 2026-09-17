@@ -24,8 +24,10 @@ public enum KrunFeatureGate {
         if format != "ext4" {
           throw unsupported("non-ext4 volume mounts")
         }
-      case .block, .virtiofs:
-        throw unsupported("host, block, and virtiofs mounts")
+      case .virtiofs:
+        break
+      case .block:
+        throw unsupported("direct block-device mounts")
       }
     }
   }

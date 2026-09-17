@@ -58,7 +58,7 @@ On `bootstrap`:
 2. Reject unsupported configuration before starting a VM.
 3. Resolve Apple's built-in `default` network to a compatible allocation-only resource, creating the managed `krun` network through the Apple network API when the built-in resource is incompatible; validate explicit networks before allocating them.
 4. Create a short private directory under `/tmp` for Unix sockets.
-5. Predeclare the vminitd/stdin/stdout/copy mappings, network devices, and resolved Apple volume disks in the helper configuration.
+5. Predeclare the vminitd/stdin/stdout/copy mappings, network devices, resolved Apple volume disks, and host virtio-fs shares in the helper configuration.
 6. Start `container-krun-vmm-helper`.
 7. Connect to guest port 1024 through libkrun's Unix proxy.
 8. Require a successful read-only vminitd RPC before considering the guest ready.
@@ -165,7 +165,7 @@ The Apple kernel already supports page reporting, and libkrun advertises `VIRTIO
 
 ## Current deferred surface
 
-Host directory/virtio-fs mounts, arbitrary `dial`, Rosetta, the `reserved` vmnet variant, nested virtualization, and `clean`/trim remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. v0.4 enables `--init`, published Unix sockets, and SSH agent forwarding. v0.5 adds live rootfs snapshot/export and multiple allocation-only network attachments.
+Arbitrary `dial`, Rosetta, the `reserved` vmnet variant, and nested virtualization remain explicit unsupported boundaries. `copyIn` / `copyOut` and Apple block-backed volumes are provided by v0.3. v0.4 enables `--init`, published Unix sockets, and SSH agent forwarding. v0.5 adds live rootfs snapshot/export and multiple allocation-only network attachments. The current runtime also provides persistent logs, filesystem trim, and host directory mounts through libkrun virtio-fs.
 
 Rosetta is intentionally not part of the active parity roadmap. Its integration is specific to Apple's Virtualization.framework-backed runtime, and users requiring x86_64 emulation should use Apple's official runtime.
 
@@ -183,7 +183,9 @@ The first slice is `copyIn` / `copyOut`. Stable libkrun cannot add vsock mapping
 
 The volume slice preserves the distinction already present in Apple Container: named and anonymous volumes are block-backed filesystems. Apple resolves and owns the volume image; the runtime attaches each unique ext4 volume as a raw libkrun virtio-blk disk, mounts it at `/run/container/<id>/volumes/<n>`, and supplies OCI bind mounts from that staging path to the requested destinations. Repeated destinations for one Apple volume reuse one attached disk. Read-only destinations remain per-mount; the underlying disk is read-only only when every use is read-only. Apple remains authoritative for volume creation, in-use tracking, persistence, and deletion.
 
-Host directory mounts are a separate future slice using virtio-fs. They require an explicit macOS confinement design before they are enabled; merely passing a directory to libkrun is not treated as a sufficient host security boundary.
+Host directory mounts use libkrun's independent virtio-fs devices. Apple remains authoritative for parsing and validating `--volume`/`--mount`; the runtime canonicalizes each source directory, assigns a stable per-VM tag, mounts the device at `/run/container/<id>/virtiofs/<n>`, and supplies an OCI bind mount from that staging path to the requested destination. Read-only intent is applied at both the virtio-fs device and bind-mount layers. Copy and published-socket path translation reuse the same staging-path resolver used for block-backed volumes, so paths shadowed by a host share remain visible to vminitd outside the container mount namespace.
+
+The stock Apple Container guest kernel and vminitd are part of the trust boundary for host shares. libkrun's macOS passthrough backend addresses host objects through the host filesystem and does not claim to confine a malicious guest kernel to the configured directory. The runtime therefore does not advertise virtio-fs as a hard host-security boundary for arbitrary custom guest kernels; callers that require that threat model must add host-side filesystem isolation or avoid host shares.
 
 Published Unix sockets use one fixed host-listening libkrun mapping per configured socket plus vminitd's existing `.outOf` relay. SSH forwarding uses the same mechanism in reverse: vminitd creates a short guest staging socket, libkrun maps guest vsock connections to the host `SSH_AUTH_SOCK`, and the staging socket is bind-mounted at `/var/host-services/ssh-auth.sock` in the container. Apple remains authoritative for both configuration surfaces; the runtime adds no relay registry or persistent state. Arbitrary runtime `dial(port)` remains the final host-integration slice because it requires a dynamic host-to-guest vsock connection after the VM has already started. If stable libkrun cannot provide that operation, prefer a small generic libkrun API addition over an Apple-specific Containerization protocol.
 

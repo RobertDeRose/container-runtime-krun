@@ -227,6 +227,7 @@ public actor KrunRuntimeService {
         process: record.configuration,
         rootPath: controller.rootPath,
         volumeAttachments: controller.volumeAttachments,
+        virtioFSShares: controller.virtioFSShares,
         socketMounts: controller.socketMounts,
         wrapWithInit: isInit && containerConfig.useInit
       )

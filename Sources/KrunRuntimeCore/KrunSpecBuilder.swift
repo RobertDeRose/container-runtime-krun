@@ -16,6 +16,7 @@ public enum KrunSpecBuilder {
       process: process,
       rootPath: rootPath,
       volumeAttachments: [],
+      virtioFSShares: try KrunVirtioFSLayout.shares(for: container),
       socketMounts: [],
       wrapWithInit: wrapWithInit
     )
@@ -26,6 +27,7 @@ public enum KrunSpecBuilder {
     process: ProcessConfiguration,
     rootPath: String,
     volumeAttachments: [KrunVolumeAttachment],
+    virtioFSShares: [KrunVirtioFSShare] = [],
     socketMounts: [ContainerizationOCI.Mount] = [],
     wrapWithInit: Bool = false
   ) throws -> Spec {
@@ -54,6 +56,7 @@ public enum KrunSpecBuilder {
       for: container,
       attachments: volumeAttachments
     ))
+    mounts.append(contentsOf: KrunVirtioFSLayout.ociMounts(virtioFSShares))
     mounts.append(contentsOf: socketMounts)
     if wrapWithInit {
       mounts.append(

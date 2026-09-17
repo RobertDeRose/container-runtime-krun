@@ -28,6 +28,33 @@ public struct KrunDiskConfig: Codable, Sendable, Equatable {
   }
 }
 
+public enum KrunVirtioFSSemantics: UInt32, Codable, Sendable, Equatable {
+  case linuxComplete = 0
+  case linuxSimplified = 1
+}
+
+public struct KrunVirtioFSConfig: Codable, Sendable, Equatable {
+  public let tag: String
+  public let path: String
+  public let readOnly: Bool
+  public let shmSize: UInt64
+  public let semantics: KrunVirtioFSSemantics
+
+  public init(
+    tag: String,
+    path: String,
+    readOnly: Bool,
+    shmSize: UInt64 = 0,
+    semantics: KrunVirtioFSSemantics = .linuxSimplified
+  ) {
+    self.tag = tag
+    self.path = path
+    self.readOnly = readOnly
+    self.shmSize = shmSize
+    self.semantics = semantics
+  }
+}
+
 public struct KrunVsockMapping: Codable, Sendable, Equatable {
   public let port: UInt32
   public let path: String
@@ -71,6 +98,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
   public let vsockMappings: [KrunVsockMapping]
   public let networks: [KrunNetworkConfig]
   public let disks: [KrunDiskConfig]
+  public let virtioFS: [KrunVirtioFSConfig]
 
   public init(
     libkrun: String,
@@ -83,7 +111,8 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     memoryMiB: UInt32,
     vsockMappings: [KrunVsockMapping],
     networks: [KrunNetworkConfig] = [],
-    disks: [KrunDiskConfig] = []
+    disks: [KrunDiskConfig] = [],
+    virtioFS: [KrunVirtioFSConfig] = []
   ) {
     self.libkrun = libkrun
     self.kernel = kernel
@@ -96,6 +125,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     self.vsockMappings = vsockMappings
     self.networks = networks
     self.disks = disks
+    self.virtioFS = virtioFS
   }
 }
 

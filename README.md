@@ -23,7 +23,7 @@ v0.4.0 establishes the lifecycle, networking, host-integration, and selected par
 | Networking | yes, managed default `allocationOnly` network plus explicit compatible attachments |
 | Published TCP/UDP ports | yes, through Apple `SocketForwarder` on the first attachment |
 | Apple named/anonymous volumes | yes, libkrun virtio-blk |
-| Host bind/virtiofs mounts | no |
+| Host bind/virtiofs mounts | yes, libkrun virtio-fs with read-write/read-only support |
 | Published Unix sockets | yes, fixed libkrun vsock mappings + vminitd relay |
 | Arbitrary runtime `dial(port)` | no |
 | `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
@@ -36,6 +36,8 @@ v0.4.0 establishes the lifecycle, networking, host-integration, and selected par
 | `--init` | yes, guest vminitd mounted as the minimal container init |
 
 Remaining unsupported features fail with `ContainerizationError(.unsupported)` rather than silently degrading. Rosetta is intentionally deferred; users requiring x86_64 emulation should use Apple's official runtime.
+
+Host bind mounts use libkrun's native virtio-fs backend. Each share is attached as an independent virtio-fs device, mounted at a VM-global staging path, and bind-mounted into the requested container destination. Read-only shares are enforced both by the libkrun device and the container bind mount. libkrun's macOS passthrough backend is not, by itself, a hard confinement boundary against a malicious guest kernel; host shares therefore assume the stock Apple Container guest kernel and vminitd are trusted. Do not expose host directories to an untrusted custom guest kernel when host-filesystem isolation is a security requirement.
 
 v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` plugin through `vmnet-helper`. Apple's default macOS 26 `reserved` variant is intentionally unsupported: macOS only permits `vmnet_interface_start_with_network` to consume a serialized network when the consuming executable has the same identity as the executable that created it, while Apple crosses that boundary through Virtualization.framework. `--network none` remains supported.
 

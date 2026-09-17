@@ -27,7 +27,8 @@ enum KrunUnixSocketRelays {
     config: ContainerConfiguration,
     dynamicEnv: [String: String],
     rootPath: String,
-    volumeAttachments: [KrunVolumeAttachment]
+    volumeAttachments: [KrunVolumeAttachment],
+    virtioFSShares: [KrunVirtioFSShare] = []
   ) throws -> [KrunUnixSocketRelay] {
     var relays: [KrunUnixSocketRelay] = []
     relays.reserveCapacity(config.publishedSockets.count + (config.ssh ? 1 : 0))
@@ -38,6 +39,7 @@ enum KrunUnixSocketRelays {
         config: config,
         rootPath: rootPath,
         volumeAttachments: volumeAttachments,
+        virtioFSShares: virtioFSShares,
         path: containerPath
       ).url
       try validateGuestSocketPath(guestPath.path)

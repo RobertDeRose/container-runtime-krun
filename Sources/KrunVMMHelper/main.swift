@@ -43,6 +43,10 @@ private final class KrunLibrary {
     @convention(c) (
       UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt32, Bool, Bool, UInt32
     ) -> Int32
+  typealias AddVirtioFS4 =
+    @convention(c) (
+      UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64, Bool, UInt32
+    ) -> Int32
   typealias AddVsock = @convention(c) (UInt32, UInt32) -> Int32
   typealias AddVsockPort = @convention(c) (UInt32, UInt32, UnsafePointer<CChar>?, Bool) -> Int32
   typealias AddNetUnixgram =
@@ -73,6 +77,7 @@ private final class KrunLibrary {
   let disableImplicitVsock: ToggleImplicitDevice
   let addDisk: AddDisk
   let addDisk3: AddDisk3?
+  let addVirtioFS4: AddVirtioFS4?
   let addVsock: AddVsock
   let addVsockPort: AddVsockPort
   let addNetUnixgram: AddNetUnixgram
@@ -95,6 +100,7 @@ private final class KrunLibrary {
       handle, "krun_disable_implicit_vsock", as: ToggleImplicitDevice.self)
     self.addDisk = try Self.load(handle, "krun_add_disk", as: AddDisk.self)
     self.addDisk3 = Self.loadOptional(handle, "krun_add_disk3", as: AddDisk3.self)
+    self.addVirtioFS4 = Self.loadOptional(handle, "krun_add_virtiofs4", as: AddVirtioFS4.self)
     self.addVsock = try Self.load(handle, "krun_add_vsock", as: AddVsock.self)
     self.addVsockPort = try Self.load(handle, "krun_add_vsock_port2", as: AddVsockPort.self)
     self.addNetUnixgram = try Self.load(
@@ -225,6 +231,31 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
               disk.syncMode.rawValue
             ),
             "krun_add_disk3(\(disk.blockID))"
+          )
+        }
+      }
+    }
+  }
+
+  if !config.virtioFS.isEmpty {
+    guard let addVirtioFS4 = krun.addVirtioFS4 else {
+      throw KrunError(
+        description: "libkrun does not export krun_add_virtiofs4 required for host directory mounts"
+      )
+    }
+    for share in config.virtioFS {
+      try withCString(share.tag) { tag in
+        try withCString(share.path) { path in
+          try checked(
+            addVirtioFS4(
+              context,
+              tag,
+              path,
+              share.shmSize,
+              share.readOnly,
+              share.semantics.rawValue
+            ),
+            "krun_add_virtiofs4(\(share.tag))"
           )
         }
       }

@@ -21,6 +21,7 @@ public final class KrunVMController: @unchecked Sendable {
   public let socketLayout: KrunSocketLayout
   public let agent: Vminitd
   let volumeAttachments: [KrunVolumeAttachment]
+  let virtioFSShares: [KrunVirtioFSShare]
   let socketRelays: [KrunUnixSocketRelay]
 
   var socketMounts: [ContainerizationOCI.Mount] {
@@ -40,6 +41,7 @@ public final class KrunVMController: @unchecked Sendable {
     socketLayout: KrunSocketLayout,
     agent: Vminitd,
     volumeAttachments: [KrunVolumeAttachment],
+    virtioFSShares: [KrunVirtioFSShare],
     socketRelays: [KrunUnixSocketRelay],
     helper: Foundation.Process,
     group: MultiThreadedEventLoopGroup,
@@ -53,6 +55,7 @@ public final class KrunVMController: @unchecked Sendable {
     self.socketLayout = socketLayout
     self.agent = agent
     self.volumeAttachments = volumeAttachments
+    self.virtioFSShares = virtioFSShares
     self.socketRelays = socketRelays
     self.helper = helper
     self.eventLoopGroup = group
@@ -88,12 +91,14 @@ public final class KrunVMController: @unchecked Sendable {
       try requireExt4Block(initfs, name: "initial filesystem")
       try requireExt4Block(rootfs, name: "container root filesystem")
       let volumeAttachments = try KrunVolumeLayout.attachments(for: config)
+      let virtioFSShares = try KrunVirtioFSLayout.shares(for: config)
       let rootPath = KrunSpecBuilder.guestRootPath(containerID: config.id)
       let socketRelays = try KrunUnixSocketRelays.make(
         config: config,
         dynamicEnv: dynamicEnv,
         rootPath: rootPath,
-        volumeAttachments: volumeAttachments
+        volumeAttachments: volumeAttachments,
+        virtioFSShares: virtioFSShares
       )
       try KrunUnixSocketRelays.prepareHostPaths(socketRelays)
 
@@ -136,7 +141,8 @@ public final class KrunVMController: @unchecked Sendable {
         memoryMiB: UInt32(memoryMiB64),
         vsockMappings: layout.mappings,
         networks: networkConfigs,
-        disks: volumeAttachments.map(\.diskConfig)
+        disks: volumeAttachments.map(\.diskConfig),
+        virtioFS: virtioFSShares.map(\.vmmConfig)
       )
       let helperConfigPath = bundle.filePath(for: "krun-vmm.json")
       try JSONEncoder().encode(helperConfig).write(to: helperConfigPath)
@@ -226,6 +232,16 @@ public final class KrunVMController: @unchecked Sendable {
             metadata: ["volume_index": "\(index)"]
           )
         }
+        for (index, share) in virtioFSShares.enumerated() {
+          try await agent.mkdir(path: share.stagingPath, all: true, perms: 0o755)
+          try await agent.mount(share.guestMount)
+          KrunLifecycleTrace.mark(
+            log,
+            startedAt: lifecycleStartedAt,
+            event: "virtiofs mount complete",
+            metadata: ["share_index": "\(index)"]
+          )
+        }
         try await KrunUnixSocketRelays.start(socketRelays, agent: agent)
         if !socketRelays.isEmpty {
           KrunLifecycleTrace.mark(
@@ -265,6 +281,7 @@ public final class KrunVMController: @unchecked Sendable {
           socketLayout: layout,
           agent: agent,
           volumeAttachments: volumeAttachments,
+          virtioFSShares: virtioFSShares,
           socketRelays: socketRelays,
           helper: helper,
           group: group,
@@ -274,6 +291,9 @@ public final class KrunVMController: @unchecked Sendable {
       } catch {
         if let cleanupAgent {
           await KrunUnixSocketRelays.stop(socketRelays, agent: cleanupAgent)
+          for share in virtioFSShares.reversed() {
+            try? await cleanupAgent.umount(path: share.stagingPath, flags: 0)
+          }
           for volume in volumeAttachments.reversed() {
             try? await cleanupAgent.umount(path: volume.stagingPath, flags: 0)
           }
@@ -299,6 +319,9 @@ public final class KrunVMController: @unchecked Sendable {
   }
 
   func unmountFilesystems() async {
+    for share in virtioFSShares.reversed() {
+      try? await agent.umount(path: share.stagingPath, flags: 0)
+    }
     for volume in volumeAttachments.reversed() {
       try? await agent.umount(path: volume.stagingPath, flags: 0)
     }

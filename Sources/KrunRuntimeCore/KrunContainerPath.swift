@@ -19,9 +19,10 @@ struct KrunResolvedContainerPath: Sendable {
 
 enum KrunContainerPath {
   /// Translate a path from the container mount namespace to the guest filesystem
-  /// root and path that vminitd can access. Block-backed volumes are staged
-  /// outside the rootfs and bind-mounted into the OCI namespace, so operations
-  /// that run in vminitd's namespace must use the staging mount as their root.
+  /// root and path that vminitd can access. Block-backed volumes and virtiofs
+  /// shares are staged outside the rootfs and bind-mounted into the OCI
+  /// namespace, so operations that run in vminitd's namespace must use the
+  /// staging mount as their root.
   static func resolve(
     controller: KrunVMController,
     path: URL
@@ -30,6 +31,7 @@ enum KrunContainerPath {
       config: controller.config,
       rootPath: controller.rootPath,
       volumeAttachments: controller.volumeAttachments,
+      virtioFSShares: controller.virtioFSShares,
       path: path
     )
   }
@@ -38,6 +40,7 @@ enum KrunContainerPath {
     config: ContainerConfiguration,
     rootPath: String,
     volumeAttachments: [KrunVolumeAttachment],
+    virtioFSShares: [KrunVirtioFSShare] = [],
     path: URL
   ) -> KrunResolvedContainerPath {
     let containerPath = normalizedAbsolutePath(path.path)
@@ -47,6 +50,7 @@ enum KrunContainerPath {
 
     var matchedDestination: String?
     var matchedAttachment: KrunVolumeAttachment?
+    var matchedShare: KrunVirtioFSShare?
     var matchedReadOnly = false
 
     for filesystem in config.mounts {
@@ -64,10 +68,24 @@ enum KrunContainerPath {
 
       matchedDestination = destination
       matchedAttachment = attachment
+      matchedShare = nil
       matchedReadOnly = filesystem.options.contains("ro")
     }
 
-    guard let destination = matchedDestination, let attachment = matchedAttachment else {
+    for share in virtioFSShares {
+      let destination = normalizedAbsolutePath(share.destination)
+      guard contains(containerPath, inMount: destination) else { continue }
+      if let current = matchedDestination, current.count >= destination.count {
+        continue
+      }
+
+      matchedDestination = destination
+      matchedAttachment = nil
+      matchedShare = share
+      matchedReadOnly = share.readOnly
+    }
+
+    guard let destination = matchedDestination else {
       return KrunResolvedContainerPath(
         root: rootPath,
         path: containerPath,
@@ -84,8 +102,21 @@ enum KrunContainerPath {
       relative = String(containerPath.dropFirst(destination.count))
     }
 
+    let stagingRoot: String
+    if let attachment = matchedAttachment {
+      stagingRoot = attachment.stagingPath
+    } else if let share = matchedShare {
+      stagingRoot = share.stagingPath
+    } else {
+      return KrunResolvedContainerPath(
+        root: rootPath,
+        path: containerPath,
+        readOnly: config.readOnly
+      )
+    }
+
     return KrunResolvedContainerPath(
-      root: attachment.stagingPath,
+      root: stagingRoot,
       path: relative,
       readOnly: matchedReadOnly
     )
