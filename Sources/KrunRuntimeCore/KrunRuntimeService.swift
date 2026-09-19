@@ -362,23 +362,46 @@ public actor KrunRuntimeService {
 
   @Sendable
   public func resize(_ message: XPCMessage) async throws -> XPCMessage {
-    guard state == .running else {
-      throw ContainerizationError(.invalidState, message: "cannot resize: container is not running")
+    let requestStartedAt = ContinuousClock.now
+    let startedAt = lifecycleStartedAt ?? requestStartedAt
+    let width = message.uint64(key: RuntimeKeys.width.rawValue)
+    let height = message.uint64(key: RuntimeKeys.height.rawValue)
+    var metadata: Logger.Metadata = [
+      "resize_id": "\(UUID().uuidString)",
+      "width": "\(width)",
+      "height": "\(height)",
+      "state": "\(state)",
+    ]
+    KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "resize received", metadata: metadata)
+    do {
+      guard state == .running else {
+        throw ContainerizationError(.invalidState, message: "cannot resize: container is not running")
+      }
+      let id = try message.id()
+      metadata["process_id"] = "\(id)"
+      guard let config else {
+        throw ContainerizationError(.invalidState, message: "runtime is not booted")
+      }
+      metadata["container_id"] = "\(config.id)"
+      guard let agent = processes[id]?.agent else {
+        throw ContainerizationError(.invalidState, message: "process \(id) is not started")
+      }
+      KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "resize RPC start", metadata: metadata)
+      try await agent.resizeProcess(
+        id: id,
+        containerID: config.id,
+        columns: UInt32(width),
+        rows: UInt32(height)
+      )
+      metadata["request_duration"] = "\(requestStartedAt.duration(to: ContinuousClock.now))"
+      KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "resize RPC complete", metadata: metadata)
+      return message.reply()
+    } catch {
+      metadata["request_duration"] = "\(requestStartedAt.duration(to: ContinuousClock.now))"
+      metadata["error"] = "\(error)"
+      KrunLifecycleTrace.mark(log, startedAt: startedAt, event: "resize failed", metadata: metadata)
+      throw error
     }
-    let id = try message.id()
-    guard let config else {
-      throw ContainerizationError(.invalidState, message: "runtime is not booted")
-    }
-    guard let agent = processes[id]?.agent else {
-      throw ContainerizationError(.invalidState, message: "process \(id) is not started")
-    }
-    try await agent.resizeProcess(
-      id: id,
-      containerID: config.id,
-      columns: UInt32(message.uint64(key: RuntimeKeys.width.rawValue)),
-      rows: UInt32(message.uint64(key: RuntimeKeys.height.rawValue))
-    )
-    return message.reply()
   }
 
   @Sendable

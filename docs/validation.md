@@ -87,6 +87,117 @@ The default memory observation window after releasing the guest allocation is 12
 
 Results are packaged as `validation-results/container-runtime-krun-regression-*.tar.gz`.
 
+### PTY resize compatibility and startup diagnostics
+
+The collector runs two independent `container exec -it` probes. Only established-
+session compatibility gates the runtime by default; the separate startup diagnostic
+remains visible without requiring a patched Apple Container CLI.
+
+**Required compatibility check (`pty-resize.txt`).** The host PTY starts at 24 rows
+and 80 columns. The guest must report that valid initial geometry with its WINCH
+trap installed. Setup requests a distinct 30-row, 90-column size and waits up to
+ten seconds for a guest WINCH observation plus an independent PTY-size sample.
+During setup only, the host may resend SIGWINCH every 500 ms without changing
+geometry. This proves a resize round trip, rather than assuming a guest readiness
+message or a fixed sleep means the host listener is ready.
+
+After setup, the probe checks 40x100, 32x72, and 24x80 in sequence (rows x columns).
+Each step makes one host size change and sends one explicit SIGWINCH to the CLI;
+it does not retry. The size change may itself also generate SIGWINCH. Each step
+has a ten-second deadline and needs a guest WINCH at the requested size and an
+independent matching sample. Returning to 24x80 also checks that the smaller
+geometry is applied. Setup and all three steps, followed by a clean CLI exit,
+are required to pass. Missing setup confirmation is a failure, not a skip.
+
+**Separate startup diagnostic (`pty-resize-startup.txt`).** A fresh exec runs the
+original immediate-after-readiness test. Guest readiness here intentionally means
+only that its trap is installed, not that the CLI has subscribed to SIGWINCH.
+It requests 40x100 and observes for ten seconds. After a failed first window it
+may send one more SIGWINCH without changing geometry. `retry=RECOVERED` still
+returns failure for this diagnostic; it never becomes a startup pass. The default
+collector records a failed diagnostic as `WARN`, records `pty_startup=FAIL` in
+`run.env` and `SUMMARY.txt`, and continues. This warning alone does not prove the
+known startup race caused it: inspect the trace and any errors.
+
+Use `--require-pty-startup` to make that diagnostic a required gate, for example
+when testing the host CLI fix. It is a separate exec even when the compatibility
+check fails. A startup warning never overrides a compatibility failure.
+
+Both traces record UTC/monotonic timestamps, host read-back geometry, guest size
+samples and signal observations. Cleanup waits up to five seconds for normal CLI
+exit, one second after SIGTERM, and two seconds after SIGKILL. Child waits remain
+bounded and drain output; cleanup errors preserve the original failure. Forced
+cleanup cannot pass either probe. Guest loops have iteration limits. The collector
+owns deletion of its test container; standalone probes do not delete a supplied
+container.
+
+The runtime logs `resize received`, `resize RPC start`, `resize RPC complete`, and
+`resize failed` through the existing lifecycle logger. `resize_id` correlates a
+request across actor suspension; metadata includes width/height, the runtime
+process ID once decoded, the container ID, elapsed lifecycle time, and request
+duration on completion/failure. `pty-resize-runtime.txt` extracts these events from
+`runtime-lifecycle.txt`. A completed RPC is not itself proof of guest trap delivery.
+
+Compare the target request (`width=100`, `height=40`) against the guest observations.
+No matching receipt points upstream of the runtime. A start without completion
+points to the agent call. Completion with stale guest geometry points to guest
+PTY selection or a later overwriting request. Correct geometry without a target
+WINCH points to guest signal handling or foreground-process-group behavior. Retain
+the full logs as well: an empty filtered trace alone does not prove no request was
+sent if log collection failed or the instrumented runtime was not installed.
+
+The collector also captures the installed libkrun hash/linkage and separately
+records the local dependency checkout HEAD, dirty state, and built dylib hashes.
+The checkout observation and configured provenance commit are not proof of the
+source used for a manually replaced installed library.
+
+For an already running test container, the probe can be invoked independently:
+
+```bash
+# Required compatibility behavior (also the default mode).
+python3 scripts/pty_resize_probe.py CONTAINER_ID --mode compatibility
+
+# Independent, strict startup diagnostic: a retry recovery still exits nonzero.
+python3 scripts/pty_resize_probe.py CONTAINER_ID --mode startup
+```
+
+Host-side probe tests require no VM and also run as part of `mise run check`:
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+```
+
+#### Preserve an experimental libkrun installation
+
+When testing with a CLI from a different checkout, set `INSTALL_ROOT` to the
+actual runtime installation root as well as selecting the CLI on `PATH`.
+Otherwise provenance collection derives a root from the selected CLI and may
+look for the plugin in that checkout. For a stock-CLI comparison, select the
+installed CLI explicitly, not the previously patched checkout. These script-only
+validation changes need no runtime rebuild or daemon restart.
+
+Do not use the collector's `--install` option when retaining a manually installed
+native-vmnet libkrun build: the normal install path manages the pinned dependency.
+Build/sign and replace only the runtime executable instead. The following leaves
+the installed VMM helper, dylib, and provenance unchanged, replaces the executable
+with a fresh inode, and restarts Apple Container before collecting evidence:
+
+```bash
+(
+  set -eu
+  mise run sign
+  install_root="${INSTALL_ROOT:-$(python3 scripts/install_root.py)}"
+  bin_dir="$install_root/libexec/container-plugins/container-runtime-krun/bin"
+  staged="$(mktemp "$bin_dir/.pty-resize-runtime.XXXXXX")"
+  trap 'rm -f "$staged"' EXIT
+  install -m 755 .build/arm64-apple-macosx/release/container-runtime-krun "$staged"
+  mv -f "$staged" "$bin_dir/container-runtime-krun"
+  container system stop
+  container system start
+  scripts/validate_runtime_regression.sh
+)
+```
+
 ## Gate 5: statistics
 
 The networked lifecycle collector runs `container stats --no-stream --format json` before and after explicit guest network traffic. Process, CPU, memory, and network fields must be populated, and both Rx and Tx counters must increase. Preserve the raw snapshots in the regression archive for review.

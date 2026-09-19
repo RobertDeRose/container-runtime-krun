@@ -202,6 +202,7 @@ while IFS= read -r file; do
   swiftc -frontend -parse "$file"
 done < <(find Sources Tests -name '*.swift' -print)
 python3 scripts/check_contract.py
+python3 -m unittest discover -s scripts/tests -v
 git --no-pager diff --check
 '''
 

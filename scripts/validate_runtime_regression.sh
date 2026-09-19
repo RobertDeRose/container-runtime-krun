@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 RUNTIME="container-runtime-krun"
 NETWORK="default"
 IMAGE="alpine:3.20"
 INSTALL=0
+REQUIRE_PTY_STARTUP=0
+PTY_STARTUP_STATUS="NOT_RUN"
 CYCLES=5
 MEMORY_OBSERVE_SECONDS=120
 RESULT_ROOT="validation-results"
@@ -22,6 +26,7 @@ Options:
   --image IMAGE               Test image (default: alpine:3.20).
   --cycles N                  Repeated create/delete cycles (default: 5).
   --memory-observe-seconds N  Host observation after releasing 1 GiB (default: 120).
+  --require-pty-startup        Also gate on the separate CLI startup-resize diagnostic.
   --result-root DIR           Output directory (default: validation-results).
   -h, --help                  Show this help.
 USAGE
@@ -48,6 +53,10 @@ while (($#)); do
     --memory-observe-seconds)
       MEMORY_OBSERVE_SECONDS="${2:?missing value for --memory-observe-seconds}"
       shift 2
+      ;;
+    --require-pty-startup)
+      REQUIRE_PTY_STARTUP=1
+      shift
       ;;
     --result-root)
       RESULT_ROOT="${2:?missing value for --result-root}"
@@ -89,6 +98,7 @@ mkdir -p "$RESULT_DIR"
 
 START_LOCAL="$(date '+%Y-%m-%d %H:%M:%S')"
 FAILURES=0
+WARNINGS=0
 declare -a CONTAINERS=()
 
 log() {
@@ -102,6 +112,11 @@ pass() {
 fail() {
   printf 'FAIL: %s\n' "$*" | tee -a "$RESULT_DIR/results.txt" >&2
   FAILURES=$((FAILURES + 1))
+}
+
+warn() {
+  printf 'WARN: %s\n' "$*" | tee -a "$RESULT_DIR/results.txt" >&2
+  WARNINGS=$((WARNINGS + 1))
 }
 
 run_capture() {
@@ -286,6 +301,7 @@ sample_host_memory_for() {
   local id="$3"
   local index=0
   local deadline=$((SECONDS + seconds))
+  log "memory observation: phase=$phase duration=${seconds}s (samples in memory-host.txt)"
   while :; do
     capture_host_memory "$phase" "$index" "$id"
     index=$((index + 1))
@@ -295,88 +311,7 @@ sample_host_memory_for() {
 }
 
 run_pty_resize_probe() {
-  local id="$1"
-  python3 - "$id" <<'PY'
-import fcntl
-import os
-import pty
-import select
-import signal
-import struct
-import sys
-import termios
-import time
-
-container_id = sys.argv[1]
-command = [
-    "container", "exec", "-i", "-t", container_id,
-    "sh", "-c",
-    "echo initial=$(stty size); "
-    "trap 'echo resized=$(stty size); exit 0' WINCH; "
-    "while :; do sleep 1; done",
-]
-
-pid, fd = pty.fork()
-if pid == 0:
-    os.execvp(command[0], command)
-
-
-def resize(rows: int, cols: int) -> None:
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-
-
-def read_until(needle: bytes, timeout: float) -> bytes:
-    deadline = time.monotonic() + timeout
-    data = bytearray()
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([fd], [], [], 0.1)
-        if not ready:
-            continue
-        try:
-            chunk = os.read(fd, 4096)
-        except OSError:
-            break
-        if not chunk:
-            break
-        data.extend(chunk)
-        if needle in data:
-            return bytes(data)
-    return bytes(data)
-
-try:
-    resize(24, 80)
-    initial = read_until(b"initial=", 10.0)
-    sys.stdout.buffer.write(initial)
-    sys.stdout.flush()
-    if b"initial=" not in initial:
-        raise RuntimeError("PTY did not produce initial terminal size")
-
-    resize(40, 100)
-    os.kill(pid, signal.SIGWINCH)
-    resized = read_until(b"resized=40 100", 10.0)
-    sys.stdout.buffer.write(resized)
-    sys.stdout.flush()
-    if b"resized=40 100" not in resized:
-        raise RuntimeError("guest PTY did not observe resize to 40x100")
-finally:
-    status = None
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        waited, candidate = os.waitpid(pid, os.WNOHANG)
-        if waited == pid:
-            status = candidate
-            break
-        time.sleep(0.05)
-    if status is None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        _, status = os.waitpid(pid, 0)
-
-if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
-    raise SystemExit(f"container exec PTY exited with wait status {status}")
-PY
+  python3 "$SCRIPT_DIR/pty_resize_probe.py" "$@"
 }
 
 log "results: $RESULT_DIR"
@@ -388,6 +323,7 @@ log "results: $RESULT_DIR"
   echo "image=$IMAGE"
   echo "cycles=$CYCLES"
   echo "memory_observe_seconds=$MEMORY_OBSERVE_SECONDS"
+  echo "require_pty_startup=$REQUIRE_PTY_STARTUP"
   echo "started_local=$START_LOCAL"
 } >"$RESULT_DIR/run.env"
 
@@ -432,6 +368,25 @@ if ((INSTALL)); then
   expect_success system_stop container system stop
   expect_success system_start container system start
 fi
+
+# Capture the installed library, not just the version configured in mise.toml.
+expect_success libkrun_provenance "$SCRIPT_DIR/capture_libkrun_provenance.sh" "$RESULT_DIR"
+{
+  source_dir="$SCRIPT_DIR/../.build-deps/libkrun"
+  echo "observed_checkout=$source_dir"
+  echo 'This checkout observation does not prove which source built the installed dylib.'
+  if [[ -e "$source_dir/.git" ]]; then
+    git -C "$source_dir" rev-parse HEAD
+    git -C "$source_dir" status --short
+    git -C "$source_dir" diff --stat HEAD
+    for dylib in "$source_dir"/target/release/libkrun.*.dylib; do
+      [[ -r "$dylib" ]] || continue
+      shasum -a 256 "$dylib"
+    done
+  else
+    echo 'local libkrun checkout unavailable'
+  fi
+} >"$RESULT_DIR/libkrun-checkout.txt" 2>&1
 
 # Natural init exit and nonzero init exit.
 NORMAL_ID="$PREFIX-init"
@@ -507,10 +462,25 @@ else
   fail "repeated exec failed"
 fi
 
-if run_pty_resize_probe "$LIFE_ID" >"$RESULT_DIR/pty-resize.txt" 2>&1; then
-  pass "PTY allocation and resize"
+log "PTY compatibility: establish resize delivery, then check three sizes without retries"
+if run_pty_resize_probe "$LIFE_ID" --mode compatibility >"$RESULT_DIR/pty-resize.txt" 2>&1; then
+  pass "PTY established-session resize (three sizes, no measured retries)"
 else
-  fail "PTY allocation or resize"
+  fail "PTY established-session resize; see pty-resize.txt"
+fi
+
+# Use a fresh exec so established-session setup cannot prime this diagnostic.
+log "PTY startup diagnostic: independent exec (non-gating unless --require-pty-startup)"
+if run_pty_resize_probe "$LIFE_ID" --mode startup >"$RESULT_DIR/pty-resize-startup.txt" 2>&1; then
+  PTY_STARTUP_STATUS="PASS"
+  pass "PTY startup diagnostic"
+else
+  PTY_STARTUP_STATUS="FAIL"
+  if ((REQUIRE_PTY_STARTUP)); then
+    fail "PTY startup diagnostic; see pty-resize-startup.txt"
+  else
+    warn "PTY startup diagnostic failed; not a runtime compatibility gate; see pty-resize-startup.txt"
+  fi
 fi
 
 expect_success stats_before container stats --no-stream --format json "$LIFE_ID"
@@ -686,6 +656,8 @@ END_LOCAL="$(date '+%Y-%m-%d %H:%M:%S')"
 {
   echo "finished_local=$END_LOCAL"
   echo "failures=$FAILURES"
+  echo "warnings=$WARNINGS"
+  echo "pty_startup=$PTY_STARTUP_STATUS"
 } >>"$RESULT_DIR/run.env"
 
 /usr/bin/log show --start "$START_LOCAL" --end "$END_LOCAL" --info --debug \
@@ -698,6 +670,9 @@ grep -E "$PREFIX|allocated attachment|released session" "$RESULT_DIR/system-logs
 grep -F 'runtime lifecycle' "$RESULT_DIR/system-logs.txt" \
   | grep -F "$PREFIX" >"$RESULT_DIR/runtime-lifecycle.txt" || true
 
+grep -F 'resize ' "$RESULT_DIR/runtime-lifecycle.txt" \
+  >"$RESULT_DIR/pty-resize-runtime.txt" || true
+
 capture_runtime_state "$RESULT_DIR/runtime-state-final.txt"
 check_no_new_network_dirs final
 
@@ -709,13 +684,21 @@ prefix=$PREFIX
 cycles=$CYCLES
 memory_observe_seconds=$MEMORY_OBSERVE_SECONDS
 failures=$FAILURES
+warnings=$WARNINGS
+pty_startup=$PTY_STARTUP_STATUS
+require_pty_startup=$REQUIRE_PTY_STARTUP
 
 Key files:
-  results.txt                 PASS/FAIL result list
+  results.txt                 PASS/FAIL results and non-gating WARN diagnostics
   runtime-lifecycle.txt       runtime monotonic lifecycle trace
   network-lifecycle.txt       Apple network allocation/release events
   stats-before/after.txt      stats including network counters
-  pty-resize.txt              real PTY resize probe
+  pty-resize.txt              bounded setup, three no-retry resizes, and cleanup
+  pty-resize-startup.txt      separate startup diagnostic; recovery remains a failure
+  pty-resize-runtime.txt      resize receipt and RPC completion/failure trace
+  libkrun-checkout.txt        observed dependency HEAD, dirty state, built dylib hashes
+  libkrun-dylib.txt           actual installed dylib hash and recorded hash
+  libkrun-otool.txt           installed dylib framework linkage
   memory-host.txt             vm_stat/swap/helper RSS samples every 5 seconds
   memory-krun-vmm.log         VMM log preserved before deleting the memory VM
   memory-allocate/after.txt   guest Shmem evidence before/after release
@@ -732,4 +715,7 @@ if ((FAILURES)); then
   log "$FAILURES validation check(s) failed"
   exit 1
 fi
-log "all runtime regression checks passed"
+if ((WARNINGS)); then
+  log "$WARNINGS non-gating diagnostic warning(s); see results.txt"
+fi
+log "all required runtime regression checks passed"
