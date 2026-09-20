@@ -146,6 +146,70 @@ class EchoHelperTests(unittest.TestCase):
         self.assertGreater(diagnostics, published)
 
 
+class PortPrivacyDiagnosisTests(unittest.TestCase):
+    def test_errno_65_backend_failure_is_identified_as_local_network_privacy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = type('Run', (), {'directory': Path(directory)})()
+            (run.directory / 'ports-diagnostic-forwarder-logs.txt').write_text(
+                'backend - connect failed: No route to host) (errno: 65)\n'
+            )
+            self.assertTrue(acceptance.local_network_privacy_denied(run))
+
+    def test_unrelated_forwarder_error_is_not_misdiagnosed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = type('Run', (), {'directory': Path(directory)})()
+            (run.directory / 'ports-diagnostic-forwarder-logs.txt').write_text(
+                'backend - connect failed: Connection refused) (errno: 61)\n'
+            )
+            self.assertFalse(acceptance.local_network_privacy_denied(run))
+
+
+class BlockedPhaseTests(unittest.TestCase):
+    def test_record_blocked_is_not_written_as_pass_or_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = type('Run', (), {'directory': Path(directory), 'results': []})()
+            acceptance.record_blocked(run, 'published ports', 'platform privacy denial')
+            self.assertEqual(run.results, ['BLOCKED: published ports: platform privacy denial'])
+            self.assertEqual((run.directory / 'results.txt').read_text(),
+                             'BLOCKED: published ports: platform privacy denial\n')
+
+    def test_blocked_results_keep_summary_unsuccessful_and_exit_nonzero(self) -> None:
+        source = Path(acceptance.__file__).read_text()
+        self.assertIn("blocked = any(line.startswith('BLOCKED:')", source)
+        self.assertIn("'success': not failed and not blocked", source)
+        self.assertIn('return int(failed or blocked)', source)
+
+    def test_privacy_block_does_not_abort_before_abnormal_phase(self) -> None:
+        source = Path(acceptance.__file__).read_text()
+        privacy = source.index('if local_network_privacy_denied(run):')
+        block = source.index('record_blocked(', privacy)
+        alternate_error = source.index('else:', block)
+        cleanup = source.index("acc.stop_delete(evidence, 'ports')", alternate_error)
+        abnormal = source.index('def abnormal_phase', cleanup)
+        self.assertNotIn('raise', source[block:alternate_error])
+        self.assertLess(block, cleanup)
+        self.assertLess(cleanup, abnormal)
+
+
+class LocalNetworkPrivacyTests(unittest.TestCase):
+    def test_runtime_triggers_local_network_privacy_before_forwarders(self) -> None:
+        root = Path(acceptance.__file__).resolve().parents[1]
+        runtime = (root / 'Sources/KrunRuntimeCore/KrunRuntimeService.swift').read_text()
+        trigger = runtime.index('KrunLocalNetworkPrivacy.trigger()')
+        forwarder = runtime.index('TCPForwarder(', trigger)
+        self.assertLess(trigger, forwarder)
+        self.assertIn('local network privacy trigger attempted', runtime)
+
+    def test_local_network_privacy_uses_tn3179_link_local_probe(self) -> None:
+        root = Path(acceptance.__file__).resolve().parents[1]
+        source = (root / 'Sources/KrunRuntimeCore/KrunLocalNetworkPrivacy.swift').read_text()
+        self.assertIn('AF_INET6', source)
+        self.assertIn('SOCK_DGRAM', source)
+        self.assertIn('getifaddrs', source)
+        self.assertIn('sin6_port = UInt16(9).bigEndian', source)
+        self.assertIn('connect(socketFD', source)
+
+
 class AcceptanceShapeTests(unittest.TestCase):
     def test_container_attachments_requires_live_networks(self) -> None:
         good = [{'status': {'networks': [{'ipv4Address': '10.0.0.2/24'}]}}]

@@ -545,8 +545,24 @@ def capture_port_diagnostics(run: native.Run, evidence: ContainerEvidence) -> No
             or 'port forwarder' in line.lower()
             or 'backend - connect' in line.lower()
             or 'socketforwarder' in line.lower()
+            or 'local network privacy' in line.lower()
         ]
         (run.directory / 'ports-diagnostic-forwarder-logs.txt').write_text('\n'.join(relevant) + ('\n' if relevant else ''))
+
+
+def local_network_privacy_denied(run: native.Run) -> bool:
+    logs = run.directory / 'ports-diagnostic-forwarder-logs.txt'
+    if not logs.is_file():
+        return False
+    text = logs.read_text(errors='replace').lower()
+    return 'backend - connect failed' in text and 'no route to host' in text and 'errno: 65' in text
+
+
+def record_blocked(run: native.Run, name: str, detail: str) -> None:
+    text = f'BLOCKED: {name}: {detail}'
+    print(text, flush=True)
+    run.results.append(text)
+    (run.directory / 'results.txt').write_text('\n'.join(run.results) + '\n')
 
 
 def port_phase(acc: Acceptance) -> None:
@@ -581,19 +597,26 @@ def port_phase(acc: Acceptance) -> None:
     address = str(ipaddress.IPv4Interface(container_attachments(evidence.inspect)[0]['ipv4Address']).ip)
     tcp_payload = b'native-published-tcp\n'
     udp_payload = b'native-published-udp'
-    try:
-        tcp_echo_address(address, 8080, tcp_payload, description='direct guest TCP echo')
-        (run.directory / 'ports-direct-tcp.txt').write_text(f'{address}:8080 direct echo passed\n')
-        udp_echo_address(address, 8081, udp_payload, description='direct guest UDP echo')
-        (run.directory / 'ports-direct-udp.txt').write_text(f'{address}:8081 direct echo passed\n')
-        run.record('direct guest TCP and UDP echo services are reachable', True)
+    tcp_echo_address(address, 8080, tcp_payload, description='direct guest TCP echo')
+    (run.directory / 'ports-direct-tcp.txt').write_text(f'{address}:8080 direct echo passed\n')
+    udp_echo_address(address, 8081, udp_payload, description='direct guest UDP echo')
+    (run.directory / 'ports-direct-udp.txt').write_text(f'{address}:8081 direct echo passed\n')
+    run.record('direct guest TCP and UDP echo services are reachable', True)
 
+    try:
         tcp_echo(tcp_port, tcp_payload)
         udp_echo(udp_port, udp_payload)
         run.record('published TCP and UDP ports reach native guest', True)
     except Exception:
         capture_port_diagnostics(run, evidence)
-        raise
+        if local_network_privacy_denied(run):
+            record_blocked(
+                run,
+                'published TCP and UDP ports reach native guest',
+                'macOS Local Network Privacy denied the SocketForwarder backend with errno 65',
+            )
+        else:
+            raise
     acc.stop_delete(evidence, 'ports')
     require(bindable(socket.SOCK_STREAM, tcp_port), 'published TCP port was not released')
     require(bindable(socket.SOCK_DGRAM, udp_port), 'published UDP port was not released')
@@ -717,13 +740,15 @@ def main() -> int:
                 run.record('acceptance cleanup', False, str(error))
 
     failed = any(line.startswith('FAIL:') for line in run.results)
+    blocked = any(line.startswith('BLOCKED:') for line in run.results)
     summary = {
-        'success': not failed,
+        'success': not failed and not blocked,
         'scope': (
             'native vmnet steps 2-6: concurrency, multi-NIC, publications, abnormal cleanup, '
             'legacy-removal/regression gate'
         ),
         'results': run.results,
+        'blocked': blocked,
         'regression_skipped': args.skip_regression,
     }
     (directory / 'SUMMARY.json').write_text(json.dumps(summary, indent=2) + '\n')
@@ -731,7 +756,7 @@ def main() -> int:
     with tarfile.open(archive, 'w:gz') as output:
         output.add(directory, arcname=directory.name)
     print(f'archive: {archive}', flush=True)
-    return int(failed)
+    return int(failed or blocked)
 
 
 if __name__ == '__main__':

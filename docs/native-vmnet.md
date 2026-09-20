@@ -153,6 +153,19 @@ The stock Container 1.4.1 startup-only PTY diagnostic may warn during the runtim
 regression; established-session resize remains mandatory. Native validation does
 not weaken or replace that test.
 
+Published TCP/UDP ports require the unprivileged runtime process to connect back
+to the guest's vmnet address. On macOS, those backend connections are subject to
+Local Network Privacy. Before creating a `SocketForwarder`, the runtime uses
+Apple's TN3179 link-local UDP technique to proactively trigger the one-time
+permission alert and logs `local network privacy trigger attempted` with the
+number of probe addresses.
+
+If macOS presents a Local Network prompt for `container-runtime-krun`, allow it.
+A denied permission presents as direct host-to-guest traffic succeeding while
+the published localhost socket resets and the runtime logs `backend - connect
+failed` with `No route to host` / errno 65. Replacing the runtime executable can
+require that permission to be granted again.
+
 ## Failure behavior and remaining validation
 
 Native interface start, TX shutdown, stop acknowledgement, and queued-callback

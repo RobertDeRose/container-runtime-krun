@@ -101,7 +101,12 @@ Published ports reuse Apple Container's public `SocketForwarder` product rather 
 
 The forwarders share the controller's NIO event-loop group and are closed before the VMM, vmnet backend, and Apple network session are torn down. If a later bind fails after earlier ports were opened, the runtime closes those already-created forwarders before returning the error. IPv6 publication requires the Apple attachment to contain an IPv6 address.
 
-Apple's stock runtime also invokes its package-scoped `LocalNetworkPrivacy` helper before binding published ports. A standalone runtime plugin cannot import that helper, so this runtime does not copy the private implementation speculatively; the normal Apple `SocketForwarder` path is used and validated on macOS.
+Before binding published ports, the runtime proactively triggers macOS Local Network Privacy using the same TN3179
+technique as Apple's stock runtime: it connects UDP sockets to randomized IPv6 link-local peers without sending traffic.
+Apple's `LocalNetworkPrivacy` type is package-scoped and cannot be imported by an external runtime, so this project carries
+the small equivalent trigger locally and logs the number of attempted probes. This avoids a failure mode where direct
+host-to-guest traffic works but `SocketForwarder` backend connections are denied with `EHOSTUNREACH` until the runtime
+receives Local Network permission.
 
 ## Process lifecycle
 

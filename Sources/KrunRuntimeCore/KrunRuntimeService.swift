@@ -728,6 +728,11 @@ public actor KrunRuntimeService {
     eventLoopGroup: any EventLoopGroup
   ) async throws -> [SocketForwarderResult] {
     guard !publishedPorts.isEmpty else { return [] }
+    let privacyProbeCount = KrunLocalNetworkPrivacy.trigger()
+    log.info(
+      "local network privacy trigger attempted",
+      metadata: ["probe_count": "\(privacyProbeCount)"]
+    )
     guard let attachment else {
       throw ContainerizationError(
         .invalidArgument,
