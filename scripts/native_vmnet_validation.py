@@ -85,7 +85,8 @@ def native_trace(text: str, config: dict[str, Any], uid: int, gid: int) -> int:
             'helper configuration uses a packet socket, offloads, or DHCP')
     ready = selected['native vmnet interface ready']
     for key, value in {'api': 'krun_add_net_vmnet_shared', 'backend': 'libkrun-vmnet-shared',
-                       'network_index': '0', 'features': '0', 'flags': '0', 'dhcp': 'false', 'isolated': 'true',
+                       'network_index': '0', 'features': '0', 'flags': '0', 'vmnet_api': 'vmnet_start_interface',
+                       'guest_dhcp': 'false', 'isolated': 'true',
                        'gateway': interface['ipv4Gateway'], 'netmask': interface['ipv4Mask']}.items():
         require(ready.get(key) == value, f'native backend attestation mismatch: {key}')
     dropped = selected['helper privileges dropped']

@@ -10,12 +10,15 @@ and attachment lifetime. The existing managed `krun` network resolution remains
 unchanged. The runtime passes the assigned subnet and MAC to
 `krun_add_net_vmnet_shared`, not `krun_add_net_unixgram`.
 
-libkrun creates the vmnet network and its interface in the VMM process, disables
-DHCP, requests interface isolation, and requires zero offload features. It checks
-that the network's returned IPv4 gateway/mask match the requested values. Its
-internal anonymous socket pair carries raw Ethernet to the existing virtio-net
-implementation; there is no external packet helper, named packet socket, or
-silent fallback. Native setup failure is a startup failure.
+libkrun starts an isolated shared-mode vmnet interface in each VMM process and
+requires zero offload features. Matching interfaces use the same Apple-owned
+allocationOnly subnet without taking an exclusive `vmnet_network_ref` reservation,
+so concurrent VMM processes can coexist on that subnet. The guest remains
+statically configured from Apple's attachment and does not run a DHCP client; the
+shared-mode vmnet DHCP service is not used by the runtime. libkrun's internal
+anonymous socket pair carries raw Ethernet to the existing virtio-net implementation;
+there is no external packet helper, named packet socket, or silent fallback. Native
+setup failure is a startup failure.
 
 ## Privilege boundary
 
@@ -102,8 +105,9 @@ The gate requires:
 
 - Matching installed/protected library and helper provenance, native exported ABI
   symbols, signatures, and a trusted dynamic-loader dependency list.
-- Exactly one `krun_add_net_vmnet_shared` success event, no default-firmware load,
-  and an irreversible UID/GID drop before guest configuration/start. The live
+- Exactly one `krun_add_net_vmnet_shared` success event backed by
+  `vmnet_start_interface`, no default-firmware load, and an irreversible UID/GID
+  drop before guest configuration/start. The live
   VMM PID must also have the caller's UID/GID.
 - The exact Apple-assigned IPv4 address, MAC, MTU (when provided), and default route
   inside the guest; a gateway response; outbound IP traffic; DNS and HTTP.
@@ -124,15 +128,30 @@ Important archive files are `SUMMARY.json`, `results.txt`, `run.json`,
 `libkrun.provenance`, `krun-vmm.json`, `krun-vmm.log`, `container-inspect.txt`,
 `processes-live.txt`, `backend-observations.json`, and the per-traffic-check outputs.
 
-After this gate passes, run the broader compatibility collector with the same
-stock CLI and installation root:
+After this gate passes twice consecutively, run the native acceptance collector:
 
 ```bash
-scripts/validate_runtime_regression.sh --memory-observe-seconds 0
+scripts/validate_native_vmnet_acceptance.sh
 ```
 
-Its startup-only PTY diagnostic may warn on stock 1.4.1; established-session resize
-remains mandatory. Native validation does not weaken or replace that test.
+It is the completion gate for the remaining native-network work. It validates two
+concurrent VMs on the same Apple network, a two-NIC container plus partial network
+allocation rollback, published TCP and UDP ports plus partial forwarder rollback,
+and recovery after an abrupt VMM `SIGKILL`. It also rejects production-source
+references to the old `vmnet-helper`, `krun_add_net_unixgram`, and named packet
+socket path.
+
+By default the acceptance collector then runs the non-superseded regression
+collectors for lifecycle/memory, init, copy, volumes, Unix sockets, virtiofs, logs,
+snapshots, and fail-closed behavior. The native acceptance scenarios replace the
+old helper-specific networking, multiple-network, and port-forwarding collectors.
+Use `--skip-regression` only while iterating on an acceptance failure; a completion
+run must omit it. Every subcollector remains independently archived by its existing
+script, while the acceptance archive records their command output/status.
+
+The stock Container 1.4.1 startup-only PTY diagnostic may warn during the runtime
+regression; established-session resize remains mandatory. Native validation does
+not weaken or replace that test.
 
 ## Failure behavior and remaining validation
 
@@ -143,14 +162,12 @@ still use. It emits `native resources retained until process exit`; the gate
 fails on that message. A caller must terminate the per-VM process after a setup
 failure. Synchronous framework calls are not converted into cancellable calls.
 
-The implementation keeps the existing multiple-attachment control-plane code,
-but this gate validates only one NIC in one VM. It does not establish that
-separately owned reserved networks can share the same Apple allocation subnet
-across multiple live VMMs, or that cross-container communication/isolation matches
-the old shared-interface backend. Concurrent VMMs/subnet reservation behavior,
-multiple attachments, published TCP/UDP ports, abrupt process death, and repeated
-lifecycle stress are the next acceptance work. Do not infer those guarantees from
-a one-container pass or deploy this as a fully validated backend replacement.
+The one-NIC gate intentionally remains narrow. The acceptance collector described
+above is what establishes concurrent same-network VMMs, multiple attachments,
+published TCP/UDP ports, partial-startup rollback, abrupt process-death recovery,
+and the final legacy-backend removal/regression gate. Do not infer those guarantees
+from a one-container pass; require a clean acceptance archive before treating the
+native backend as the complete replacement.
 
 To remove the privileged authorization without uninstalling other Apple software:
 

@@ -183,7 +183,8 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
       startedAt: startedAt, event: "native vmnet interface ready",
       metadata: [
         "backend": "libkrun-vmnet-shared", "network_index": "\(index)",
-        "api": "krun_add_net_vmnet_shared", "dhcp": "false", "isolated": "true",
+        "api": "krun_add_net_vmnet_shared", "vmnet_api": "vmnet_start_interface",
+        "guest_dhcp": "false", "isolated": "true",
         "gateway": network.ipv4Gateway, "netmask": network.ipv4Mask,
         "features": "\(network.features)", "flags": "\(network.flags)",
       ]

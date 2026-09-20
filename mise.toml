@@ -149,3 +149,7 @@ brew list --versions llvm lld xz 2>/dev/null || true
 [tasks."validate:native-vmnet"]
 description = "Validate the installed native backend, UID drop, and one-NIC packet flow without rebuilding"
 run = "scripts/validate_native_vmnet.sh"
+
+[tasks."validate:native-vmnet:acceptance"]
+description = "Validate native vmnet concurrency, multi-NIC, publications, abnormal cleanup, and final regressions"
+run = "scripts/validate_native_vmnet_acceptance.sh"
