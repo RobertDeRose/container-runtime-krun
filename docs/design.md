@@ -83,7 +83,13 @@ Apple Container's network service remains the source of truth for network resour
 
 Explicit network names are not rewritten. Before allocation, the runtime inspects the requested resource and requires `container-network-vmnet`, NAT mode, and `variant=allocationOnly`; incompatible resources fail with an actionable error. The runtime then opens a persistent `ContainerNetworkClient` session and requests the configured hostname/MAC, yielding the normal Apple `Attachment` data.
 
-For `allocationOnly`, libkrun needs a packet backend, so the runtime launches `vmnet-helper` in shared+isolated mode on the allocated subnet and passes its Unix datagram socket plus the Apple-allocated MAC to `krun_add_net_unixgram`. No second IPAM layer is introduced.
+For `allocationOnly`, the runtime passes the Apple-allocated subnet/MAC to
+`krun_add_net_vmnet_shared`. The protected VMM helper creates the network and
+interface through native libkrun, then permanently drops to the caller's UID/GID
+before opening guest resources. DHCP and offload features are disabled. There is
+no external helper or named packet socket. Apple still owns allocation and the
+persistent attachment session. See [native vmnet](native-vmnet.md) for installation,
+security boundaries, timeout behavior, and the currently limited acceptance scope.
 
 After vminitd is ready, the controller applies the Apple attachment to `eth0`: address, MTU, any required link route, default route, DNS, and the container hostname entry. Network statistics come from vminitd's existing cgroup/network stats surface.
 

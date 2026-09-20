@@ -342,3 +342,12 @@ A host symlink pointing outside the exposed directory is exercised as a normal g
 libkrun's macOS virtio-fs backend does not provide a hard confinement boundary against a malicious
 or compromised guest kernel. This gate validates normal container/VFS behavior with the stock Apple
 Container guest kernel; it does not claim to validate a hostile-kernel security boundary.
+
+
+## Native libkrun vmnet integration
+
+Use `scripts/validate_native_vmnet.sh` after the coordinated native installation.
+This is a separate one-NIC integration gate, not the old direct-vmnet feasibility
+probe. It verifies provenance, native ABI use, privilege drop, assigned guest
+configuration, bidirectional packet flow, and cleanup without installing or
+rebuilding anything. See [native setup and evidence](native-vmnet.md).

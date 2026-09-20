@@ -19,7 +19,8 @@ import Testing
     ],
     networks: [
       .init(
-        socketPath: "/tmp/net0.sock",
+        ipv4Gateway: "192.168.200.1",
+        ipv4Mask: "255.255.255.0",
         macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
       )
     ],
@@ -45,7 +46,8 @@ import Testing
 
 @Test func networkConfigDefaultsToNoOffloadFlags() {
   let network = KrunNetworkConfig(
-    socketPath: "/tmp/net0.sock",
+    ipv4Gateway: "192.168.200.1",
+    ipv4Mask: "255.255.255.0",
     macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
   )
   #expect(network.features == 0)
@@ -59,10 +61,49 @@ import Testing
 
 @Test func bundledLibkrunPathIsRelativeToPluginExecutable() {
   let executable = URL(
-    fileURLWithPath: "/opt/container/libexec/container-plugins/container-runtime-krun/bin/container-runtime-krun"
+    fileURLWithPath:
+      "/opt/container/libexec/container-plugins/container-runtime-krun/bin/container-runtime-krun"
   )
   #expect(
     KrunDefaults.bundledLibkrunPath(executableURL: executable)
       == "/opt/container/libexec/container-plugins/container-runtime-krun/lib/libkrun.dylib"
   )
+}
+
+@Test func nativeVMNetAcceptsBoundedStaticConfiguration() throws {
+  let network = KrunNetworkConfig(
+    ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0",
+    macAddress: [2, 0, 0, 0, 0, 1]
+  )
+  try network.validateNativeVMNet()
+  let data = try JSONEncoder().encode(network)
+  let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  #expect(json["socketPath"] == nil)
+}
+
+@Test func nativeVMNetRejectsInvalidMACAndOffloads() {
+  for mac: [UInt8] in [[], [2, 0], [0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 1]] {
+    let network = KrunNetworkConfig(
+      ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0", macAddress: mac
+    )
+    #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
+  }
+  for (features, flags): (UInt32, UInt32) in [(1, 0), (0, 1)] {
+    let network = KrunNetworkConfig(
+      ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0",
+      macAddress: [2, 0, 0, 0, 0, 1], features: features, flags: flags
+    )
+    #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
+  }
+}
+
+@Test func nativeVMNetRejectsControlCharactersAndOversizedAddresses() {
+  for gateway in [
+    "192.168.1.1\u{0}evil", "192.168.1.1\n", "[::1]", String(repeating: "1", count: 16),
+  ] {
+    let network = KrunNetworkConfig(
+      ipv4Gateway: gateway, ipv4Mask: "255.255.255.0", macAddress: [2, 0, 0, 0, 0, 1]
+    )
+    #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
+  }
 }

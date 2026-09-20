@@ -68,18 +68,21 @@ public struct KrunVsockMapping: Codable, Sendable, Equatable {
 }
 
 public struct KrunNetworkConfig: Codable, Sendable, Equatable {
-  public let socketPath: String
+  public let ipv4Gateway: String
+  public let ipv4Mask: String
   public let macAddress: [UInt8]
   public let features: UInt32
   public let flags: UInt32
 
   public init(
-    socketPath: String,
+    ipv4Gateway: String,
+    ipv4Mask: String,
     macAddress: [UInt8],
     features: UInt32 = 0,
     flags: UInt32 = 0
   ) {
-    self.socketPath = socketPath
+    self.ipv4Gateway = ipv4Gateway
+    self.ipv4Mask = ipv4Mask
     self.macAddress = macAddress
     self.features = features
     self.flags = flags
@@ -130,6 +133,13 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
 }
 
 public enum KrunDefaults {
+  // Fixed, root-owned installation; never derive privileged code paths from an
+  // environment variable, the user-controlled VM configuration, or PATH.
+  public static let nativeInstallDirectory =
+    "/Library/PrivilegedHelperTools/com.github.robertderose.container-runtime-krun"
+  public static let nativeHelperPath = nativeInstallDirectory + "/bin/container-krun-vmm-helper"
+  public static let nativeLibkrunPath = nativeInstallDirectory + "/lib/libkrun.dylib"
+
   public static let controlPort: UInt32 = 1024
   public static let firstIOPort: UInt32 = 0x1000_0000
   public static let ioPortCount = 96

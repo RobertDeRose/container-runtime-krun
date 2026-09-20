@@ -4,9 +4,7 @@ min_version = "2026.9.3"
 rust = { version = "1.98.1", profile = "minimal" }
 
 [vars]
-LIBKRUN_SOURCE_REPO = "https://github.com/RobertDeRose/libkrun"
-LIBKRUN_REPO = { default = "https://github.com/RobertDeRose/libkrun.git" }
-LIBKRUN_COMMIT = "f435571928f12558325af7435dcae8ab6f4dd814"
+LIBKRUN_BASE_COMMIT = "09db77cb6a14fbc29a67870f4dbbea7017541a32"
 LIBKRUN_UPSTREAM_BASE = "728df8125077d0db44265f6e997c72b81b65c015"
 LIBKRUN_VERSION = "1.19.4"
 LIBKRUN_FEATURES = "BLK=1 NET=1"
@@ -20,68 +18,9 @@ outputs = [
 ]
 run = "swift build --force-resolved-versions"
 
-[tasks."libkrun:checkout"]
-description = "Check out the pinned libkrun source"
-sources = ["mise.toml"]
-outputs = [".build-deps/libkrun/.checkout-{{vars.LIBKRUN_COMMIT}}"]
-run = '''
-#!/usr/bin/env bash
-set -euo pipefail
-
-source_dir="$MISE_PROJECT_ROOT/.build-deps/libkrun"
-stamp="$source_dir/.checkout-{{vars.LIBKRUN_COMMIT}}"
-repo={{ vars.LIBKRUN_REPO | quote }}
-commit={{ vars.LIBKRUN_COMMIT | quote }}
-
-rm -rf "$source_dir"
-mkdir -p "$(dirname "$source_dir")"
-git init -q "$source_dir"
-git -C "$source_dir" remote add origin "$repo"
-git -C "$source_dir" fetch -q --depth=1 origin "$commit"
-git -C "$source_dir" checkout -q --detach FETCH_HEAD
-
-test "$(git -C "$source_dir" rev-parse HEAD)" = "$commit"
-touch "$stamp"
-'''
-
 [tasks.libkrun]
-description = "Build the pinned libkrun dependency"
-depends = ["libkrun:checkout"]
-sources = [".build-deps/libkrun/.checkout-{{vars.LIBKRUN_COMMIT}}"]
-outputs = [".build-deps/libkrun/target/release/libkrun.{{vars.LIBKRUN_VERSION}}.dylib"]
-run = '''
-#!/usr/bin/env bash
-set -euo pipefail
-
-source_dir="$MISE_PROJECT_ROOT/.build-deps/libkrun"
-dylib="$source_dir/target/release/libkrun.{{vars.LIBKRUN_VERSION}}.dylib"
-llvm_prefix="${LLVM_PREFIX:-$(brew --prefix llvm 2>/dev/null || true)}"
-lld_prefix="${LLD_PREFIX:-$(brew --prefix lld 2>/dev/null || true)}"
-libclang_link="$source_dir/target/release/libclang.dylib"
-
-[[ -n "$llvm_prefix" ]] || { echo "Homebrew llvm is required to build libkrun" >&2; exit 1; }
-[[ -n "$lld_prefix" ]] || { echo "Homebrew lld is required to build libkrun" >&2; exit 1; }
-[[ -r "$llvm_prefix/lib/libclang.dylib" ]] || {
-  echo "libclang.dylib not found under $llvm_prefix" >&2
-  exit 1
-}
-[[ -x "$lld_prefix/bin/ld.lld" ]] || { echo "ld.lld not found under $lld_prefix" >&2; exit 1; }
-
-mkdir -p "$source_dir/target/release"
-ln -sfn "$llvm_prefix/lib/libclang.dylib" "$libclang_link"
-trap 'rm -f "$libclang_link"' EXIT
-
-PATH="$lld_prefix/bin:$llvm_prefix/bin:$PATH" \
-  LIBCLANG_PATH="$llvm_prefix/lib" \
-  make -C "$source_dir" BLK=1 NET=1
-
-[[ -r "$dylib" ]] || { echo "libkrun build did not produce $dylib" >&2; exit 1; }
-if otool -L "$dylib" | tail -n +2 | grep -Eq '(/opt/homebrew|/usr/local/(Cellar|opt))'; then
-  echo "Bundled libkrun has a Homebrew runtime dependency:" >&2
-  otool -L "$dylib" >&2
-  exit 1
-fi
-'''
+description = "Build the patched libkrun checkout under .build-deps/libkrun"
+run = "scripts/build_native_libkrun.sh"
 
 [tasks."release:build"]
 description = "Build the arm64 runtime release binaries"
@@ -113,57 +52,17 @@ touch "$build_dir/.container-runtime-krun-signed"
 '''
 
 [tasks.release]
-description = "Build libkrun and signed arm64 release binaries"
+description = "Build patched libkrun and signed arm64 release binaries"
 depends = ["libkrun", "sign"]
 
 [tasks.install]
-description = "Install the runtime plugin into Apple Container"
+description = "Install native vmnet runtime and protected helper (requests sudo)"
 depends = ["release"]
-run = '''
-#!/usr/bin/env bash
-set -euo pipefail
+run = "scripts/install_native_vmnet.sh"
 
-install_root="${INSTALL_ROOT:-$(python3 "$MISE_PROJECT_ROOT/scripts/install_root.py" 2>/dev/null || true)}"
-[[ -n "$install_root" ]] || {
-  echo "Unable to derive INSTALL_ROOT; pass INSTALL_ROOT=/path/to/container prefix" >&2
-  exit 1
-}
-
-plugin_dir="$install_root/libexec/container-plugins/container-runtime-krun"
-build_dir="$MISE_PROJECT_ROOT/.build/arm64-apple-macosx/release"
-libkrun_source="$MISE_PROJECT_ROOT/.build-deps/libkrun"
-libkrun_dylib="$libkrun_source/target/release/libkrun.{{vars.LIBKRUN_VERSION}}.dylib"
-source_repo={{ vars.LIBKRUN_SOURCE_REPO | quote }}
-fetch_repo={{ vars.LIBKRUN_REPO | quote }}
-
-mkdir -p "$plugin_dir/bin" "$plugin_dir/lib" "$plugin_dir/share/licenses/libkrun"
-cp "$MISE_PROJECT_ROOT/plugin/container-runtime-krun/config.toml" "$plugin_dir/config.toml"
-
-# Replace executable images with new inodes. macOS caches code-signature validation per inode, so
-# overwriting an already-executed Mach-O in place can leave the kernel validating stale signature data.
-stage_dir="$(mktemp -d "$plugin_dir/.install.XXXXXX")"
-trap 'rm -rf "$stage_dir"' EXIT
-cp "$build_dir/container-runtime-krun" "$stage_dir/container-runtime-krun"
-cp "$build_dir/container-krun-vmm-helper" "$stage_dir/container-krun-vmm-helper"
-cp "$libkrun_dylib" "$stage_dir/libkrun.dylib"
-mv -f "$stage_dir/container-runtime-krun" "$plugin_dir/bin/container-runtime-krun"
-mv -f "$stage_dir/container-krun-vmm-helper" "$plugin_dir/bin/container-krun-vmm-helper"
-mv -f "$stage_dir/libkrun.dylib" "$plugin_dir/lib/libkrun.dylib"
-
-cp "$libkrun_source/LICENSE" "$plugin_dir/share/licenses/libkrun/LICENSE"
-{
-  echo "repository=$source_repo"
-  echo "fetch_repository=$fetch_repo"
-  echo "commit={{vars.LIBKRUN_COMMIT}}"
-  echo "upstream_base={{vars.LIBKRUN_UPSTREAM_BASE}}"
-  echo "version={{vars.LIBKRUN_VERSION}}"
-  echo "features={{vars.LIBKRUN_FEATURES}}"
-  echo "sha256=$(shasum -a 256 "$libkrun_dylib" | awk '{print $1}')"
-} >"$plugin_dir/lib/libkrun.provenance"
-
-echo "Installed $plugin_dir"
-echo "Restart Apple Container with: container system stop && container system start"
-'''
+[tasks."native:install"]
+description = "Build/install the patched native-vmnet dependency"
+depends = ["install"]
 
 [tasks.uninstall]
 description = "Remove the installed runtime plugin"
@@ -177,6 +76,8 @@ install_root="${INSTALL_ROOT:-$(python3 "$MISE_PROJECT_ROOT/scripts/install_root
   exit 1
 }
 rm -rf "$install_root/libexec/container-plugins/container-runtime-krun"
+sudo rm -f /etc/sudoers.d/container-runtime-krun-native-vmnet
+sudo rm -rf /Library/PrivilegedHelperTools/com.github.robertderose.container-runtime-krun
 '''
 
 [tasks."profile:hvf-startup"]
@@ -223,14 +124,18 @@ lld_prefix="${LLD_PREFIX:-$(brew --prefix lld 2>/dev/null || true)}"
 
 install_root="${INSTALL_ROOT:-$(python3 "$MISE_PROJECT_ROOT/scripts/install_root.py" 2>/dev/null || true)}"
 plugin_dir="$install_root/libexec/container-plugins/container-runtime-krun"
-libkrun_dylib="$MISE_PROJECT_ROOT/.build-deps/libkrun/target/release/libkrun.{{vars.LIBKRUN_VERSION}}.dylib"
+libkrun_source="$MISE_PROJECT_ROOT/.build-deps/libkrun"
+libkrun_dylib="$libkrun_source/target/release/libkrun.{{vars.LIBKRUN_VERSION}}.dylib"
 
 echo "container=$(command -v container)"
 echo "swift=$(swift --version | head -n 1)"
 echo "rustc=$(rustc --version)"
 echo "cargo=$(cargo --version)"
 echo "install-root=$install_root"
-echo "libkrun-source={{vars.LIBKRUN_SOURCE_REPO}}@{{vars.LIBKRUN_COMMIT}}"
+echo "libkrun-source=$libkrun_source"
+if [[ -d "$libkrun_source/.git" ]]; then
+  echo "libkrun-head=$(git -C "$libkrun_source" rev-parse HEAD)"
+fi
 if [[ -r "$plugin_dir/lib/libkrun.dylib" ]]; then
   echo "libkrun=$plugin_dir/lib/libkrun.dylib"
 elif [[ -r "$libkrun_dylib" ]]; then
@@ -238,5 +143,9 @@ elif [[ -r "$libkrun_dylib" ]]; then
 else
   echo "libkrun=not built yet"
 fi
-brew list --versions llvm lld xz vmnet-helper 2>/dev/null || true
+brew list --versions llvm lld xz 2>/dev/null || true
 '''
+
+[tasks."validate:native-vmnet"]
+description = "Validate the installed native backend, UID drop, and one-NIC packet flow without rebuilding"
+run = "scripts/validate_native_vmnet.sh"

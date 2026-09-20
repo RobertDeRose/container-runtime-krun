@@ -6,6 +6,16 @@ The project exists to validate and productize one specific advantage demonstrate
 
 No changes to `apple/container` or `apple/containerization` are required. The plugin uses Apple Container's public `runtime` plugin contract.
 
+## Native vmnet development slice
+
+This branch now uses **native libkrun vmnet on macOS 26+**, with a protected
+privileged setup followed by permanent UID/GID drop. Apply the coordinated libkrun
+patch to the repository-managed `.build-deps/libkrun` checkout. Native build/install
+tasks use that checkout directly and do not require a separate source-path variable.
+Read [native setup and one-NIC validation](docs/native-vmnet.md) before installing.
+The capability table below describes the established runtime baseline, not proof
+that every topology has already passed on this new packet backend.
+
 ## Current scope
 
 v0.4.0 establishes the lifecycle, networking, host-integration, and selected parity baseline. Development on v0.5 adds live rootfs export, multiple network attachments, and repeatable runtime comparisons:
@@ -39,43 +49,30 @@ Remaining unsupported features fail with `ContainerizationError(.unsupported)` r
 
 Host bind mounts use libkrun's native virtio-fs backend. Each share is attached as an independent virtio-fs device, mounted at a VM-global staging path, and bind-mounted into the requested container destination. Read-only shares are enforced both by the libkrun device and the container bind mount. libkrun's macOS passthrough backend is not, by itself, a hard confinement boundary against a malicious guest kernel; host shares therefore assume the stock Apple Container guest kernel and vminitd are trusted. Do not expose host directories to an untrusted custom guest kernel when host-filesystem isolation is a security requirement.
 
-v0.2 supports the `allocationOnly` variant of Apple's `container-network-vmnet` plugin through `vmnet-helper`. Apple's default macOS 26 `reserved` variant is intentionally unsupported: macOS only permits `vmnet_interface_start_with_network` to consume a serialized network when the consuming executable has the same identity as the executable that created it, while Apple crosses that boundary through Virtualization.framework. `--network none` remains supported.
+The native path preserves Apple's `allocationOnly` attachment allocator and the
+managed default-network resolution. It creates its own vmnet network in libkrun;
+Apple's `reserved` serialization is not consumed. `--network none` remains
+unprivileged. Native failures never fall back to external `vmnet-helper`.
 
 ## Prerequisites
 
-- Apple Silicon Mac
-- Apple Container 1.4.1 / commit `9a8917ca2da5cd6ba059b9ba5ca5a74892e9bb7d`
-- Containerization `0.45.0`
-- mise 2026.9.3+
-- Swift 6.2+ from Xcode
-- Homebrew `llvm`, `lld`, and `xz` as libkrun build dependencies
-- `vmnet-helper` when using networking
-
-The release build fetches and builds the exact libkrun source used by this runtime:
-
-```text
-repository=https://github.com/RobertDeRose/libkrun
-commit=d37b5c0f72998df5cddd79ae71af4d0006f5f543
-version=1.19.4
-```
-
-The fetch transport can be overridden without changing the pinned source commit, for example `LIBKRUN_REPO=git@github.com:RobertDeRose/libkrun.git mise run libkrun`.
-
-No Homebrew or system libkrun installation is used at runtime. Install the build and networking dependencies with:
+- Apple Silicon Mac running macOS 26+ and a macOS 26+ SDK.
+- Apple Container 1.4.1 (`9a8917c`) and Containerization 0.45.0.
+- mise 2026.9.3+, Xcode Swift 6.2+, Homebrew `llvm`, `lld`, and `xz`.
+- The coordinated libkrun patch, applied with `git am --3way` to the managed pinned checkout.
+- Administrator approval for a root-owned helper/library and a narrowly scoped
+  per-user sudo rule. The VM runs unprivileged after native network setup.
 
 ```bash
 brew install llvm lld xz
-brew tap nirs/vmnet-helper
-brew trust nirs/vmnet-helper
-brew install vmnet-helper
 ```
 
 ## Build and install
 
 ```bash
+git -C .build-deps/libkrun am --3way ~/Downloads/libkrun-native-vmnet-owned-network.patch
 mise install
-mise run release
-mise run install
+mise run native:install
 ```
 
 The build, release, and test tasks use `--force-resolved-versions` to enforce the committed `Package.resolved`,
@@ -83,7 +80,7 @@ including transitive dependency versions. Use the same flag with direct `swift b
 For an intentional dependency change, resolve or update dependencies separately, review and commit
 `Package.resolved`, then rerun validation. Do not delete the lockfile to clear build warnings.
 
-`mise run install` derives the Apple Container installation root from the resolved `container` executable. mise pins Rust 1.98.1 for the libkrun build. Override the installation root when necessary:
+`mise run native:install` (also available as `mise run install`) derives the Apple Container installation root from the resolved `container` executable. mise pins Rust 1.98.1 for the libkrun build. Override the installation root when necessary:
 
 ```bash
 INSTALL_ROOT=/path/to/container/install/root mise run install
@@ -103,7 +100,10 @@ $INSTALL_ROOT/libexec/container-plugins/container-runtime-krun/
 └── share/licenses/libkrun/LICENSE
 ```
 
-The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not need that entitlement because libkrun is isolated in the helper process. The runtime resolves the packaged `lib/libkrun.dylib` by default. `LIBKRUN_DYLIB` remains available as an explicit development/test override.
+The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not need that entitlement because libkrun is isolated in the helper process. Networked VMs load the fixed root-owned copy under
+`/Library/PrivilegedHelperTools/com.github.robertderose.container-runtime-krun`.
+Networkless VMs use the packaged copy. `LIBKRUN_DYLIB` is rejected for native setup
+unless it names the protected copy. See [the privilege boundary](docs/native-vmnet.md#privilege-boundary).
 
 Restart the Apple Container system after installing so the API server rescans runtime plugins:
 

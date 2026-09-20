@@ -6,7 +6,14 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 main = (ROOT / "Sources/KrunRuntimePlugin/main.swift").read_text()
-helper = (ROOT / "Sources/KrunVMMHelper/main.swift").read_text()
+helper_directory = ROOT / "Sources/KrunVMMHelper"
+if (helper_directory / "main.swift").exists():
+    print(
+        "KrunVMMHelper uses @main; keep its entry point in KrunVMMHelperMain.swift, not main.swift",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+helper = (helper_directory / "KrunVMMHelperMain.swift").read_text()
 config = (ROOT / "plugin/container-runtime-krun/config.toml").read_text()
 
 routes = {
@@ -36,13 +43,13 @@ if missing or extra:
 
 required_symbols = {
     "krun_init_log",
-    "krun_create_ctx",
+    "krun_create_ctx2",
     "krun_free_ctx",
     "krun_set_vm_config",
     "krun_disable_implicit_vsock",
     "krun_add_vsock",
     "krun_add_vsock_port2",
-    "krun_add_net_unixgram",
+    "krun_add_net_vmnet_shared",
     "krun_add_disk",
     "krun_disable_implicit_console",
     "krun_add_virtio_console_default",
@@ -242,8 +249,8 @@ vmnet_backend = (ROOT / "Sources/KrunRuntimeCore/KrunVMNetBackend.swift").read_t
 for required in (
     'case "allocationOnly"',
     'case "reserved"',
-    '"--operation-mode", "shared"',
-    '"--enable-isolation"',
+    "ipv4Gateway: attachment.ipv4Gateway.description",
+    "macAddress: macAddress.bytes",
 ):
     if required not in vmnet_backend:
         print(f"vmnet backend is missing {required}", file=sys.stderr)

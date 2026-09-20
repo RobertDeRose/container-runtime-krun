@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import KrunVMMProtocol
 
@@ -31,9 +32,9 @@ private enum HelperLifecycleTrace {
   }
 }
 
-private final class KrunLibrary {
+private final class KrunLibrary: @unchecked Sendable {
   typealias InitLog = @convention(c) (Int32, UInt32, UInt32, UInt32) -> Int32
-  typealias CreateContext = @convention(c) () -> Int32
+  typealias CreateContext = @convention(c) (UInt32) -> Int32
   typealias FreeContext = @convention(c) (UInt32) -> Int32
   typealias SetVMConfig = @convention(c) (UInt32, UInt8, UInt32) -> Int32
   typealias ToggleImplicitDevice = @convention(c) (UInt32) -> Int32
@@ -49,14 +50,10 @@ private final class KrunLibrary {
     ) -> Int32
   typealias AddVsock = @convention(c) (UInt32, UInt32) -> Int32
   typealias AddVsockPort = @convention(c) (UInt32, UInt32, UnsafePointer<CChar>?, Bool) -> Int32
-  typealias AddNetUnixgram =
+  typealias AddNetVMNetShared =
     @convention(c) (
-      UInt32,
-      UnsafePointer<CChar>?,
-      Int32,
-      UnsafeMutablePointer<UInt8>?,
-      UInt32,
-      UInt32
+      UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
+      UnsafeMutablePointer<UInt8>?, UInt32, UInt32
     ) -> Int32
   typealias AddConsole = @convention(c) (UInt32, Int32, Int32, Int32) -> Int32
   typealias SetKernel =
@@ -67,6 +64,7 @@ private final class KrunLibrary {
       UnsafePointer<CChar>?,
       UnsafePointer<CChar>?
     ) -> Int32
+  typealias RequestVMMStop = @convention(c) (UInt32) -> Int32
   typealias StartEnter = @convention(c) (UInt32) -> Int32
 
   private let handle: UnsafeMutableRawPointer
@@ -80,10 +78,11 @@ private final class KrunLibrary {
   let addVirtioFS4: AddVirtioFS4?
   let addVsock: AddVsock
   let addVsockPort: AddVsockPort
-  let addNetUnixgram: AddNetUnixgram
+  let addNetVMNetShared: AddNetVMNetShared
   let disableImplicitConsole: ToggleImplicitDevice
   let addConsole: AddConsole
   let setKernel: SetKernel
+  let requestVMMStop: RequestVMMStop
   let startEnter: StartEnter
 
   init(path: String) throws {
@@ -93,7 +92,7 @@ private final class KrunLibrary {
     }
     self.handle = handle
     self.initLog = try Self.load(handle, "krun_init_log", as: InitLog.self)
-    self.createContext = try Self.load(handle, "krun_create_ctx", as: CreateContext.self)
+    self.createContext = try Self.load(handle, "krun_create_ctx2", as: CreateContext.self)
     self.freeContext = try Self.load(handle, "krun_free_ctx", as: FreeContext.self)
     self.setVMConfig = try Self.load(handle, "krun_set_vm_config", as: SetVMConfig.self)
     self.disableImplicitVsock = try Self.load(
@@ -103,12 +102,13 @@ private final class KrunLibrary {
     self.addVirtioFS4 = Self.loadOptional(handle, "krun_add_virtiofs4", as: AddVirtioFS4.self)
     self.addVsock = try Self.load(handle, "krun_add_vsock", as: AddVsock.self)
     self.addVsockPort = try Self.load(handle, "krun_add_vsock_port2", as: AddVsockPort.self)
-    self.addNetUnixgram = try Self.load(
-      handle, "krun_add_net_unixgram", as: AddNetUnixgram.self)
+    self.addNetVMNetShared = try Self.load(
+      handle, "krun_add_net_vmnet_shared", as: AddNetVMNetShared.self)
     self.disableImplicitConsole = try Self.load(
       handle, "krun_disable_implicit_console", as: ToggleImplicitDevice.self)
     self.addConsole = try Self.load(handle, "krun_add_virtio_console_default", as: AddConsole.self)
     self.setKernel = try Self.load(handle, "krun_set_kernel", as: SetKernel.self)
+    self.requestVMMStop = try Self.load(handle, "krun_request_vmm_stop", as: RequestVMMStop.self)
     self.startEnter = try Self.load(handle, "krun_start_enter", as: StartEnter.self)
   }
 
@@ -147,17 +147,59 @@ private func withCString<Result>(_ value: String, _ body: (UnsafePointer<CChar>)
 }
 
 private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) throws -> Never {
+  let target = try NativeVMNetPrivileges.validate(config: config)
   let krun = try KrunLibrary(path: config.libkrun)
-  HelperLifecycleTrace.mark(startedAt: startedAt, event: "libkrun loaded")
-  try checked(krun.initLog(-1, 3, 2, 0), "krun_init_log")
+  HelperLifecycleTrace.mark(
+    startedAt: startedAt, event: "libkrun loaded",
+    metadata: ["path": config.libkrun]
+  )
+  try checked(krun.initLog(-1, 3, 2, 1), "krun_init_log(no environment)")
 
-  let created = krun.createContext()
+  // Context creation must not search for libkrunfw while this process is root.
+  // This runtime always supplies Apple's explicit kernel below.
+  let created = krun.createContext(1) // KRUN_CTX_NO_DEFAULT_FIRMWARE
   guard created >= 0 else {
-    throw KrunError(description: "krun_create_ctx failed with libkrun error \(created)")
+    throw KrunError(description: "krun_create_ctx2 failed with libkrun error \(created)")
   }
   let context = UInt32(created)
   defer { _ = krun.freeContext(context) }
-  HelperLifecycleTrace.mark(startedAt: startedAt, event: "context created")
+  HelperLifecycleTrace.mark(startedAt: startedAt, event: "context created", metadata: ["default_firmware": "disabled"])
+
+  // Only native interface creation is privileged. No VM files or guest CPU
+  // execution are touched until the irreversible UID/GID drop has completed.
+  for (index, network) in config.networks.enumerated() {
+    var mac = network.macAddress
+    try network.ipv4Gateway.withCString { gateway in
+      try network.ipv4Mask.withCString { mask in
+        try mac.withUnsafeMutableBufferPointer { bytes in
+          try checked(
+            krun.addNetVMNetShared(context, gateway, mask, bytes.baseAddress, network.features, network.flags),
+            "krun_add_net_vmnet_shared(net\(index))"
+          )
+        }
+      }
+    }
+    HelperLifecycleTrace.mark(
+      startedAt: startedAt, event: "native vmnet interface ready",
+      metadata: [
+        "backend": "libkrun-vmnet-shared", "network_index": "\(index)",
+        "api": "krun_add_net_vmnet_shared", "dhcp": "false", "isolated": "true",
+        "gateway": network.ipv4Gateway, "netmask": network.ipv4Mask,
+        "features": "\(network.features)", "flags": "\(network.flags)",
+      ]
+    )
+  }
+  if let target {
+    try NativeVMNetPrivileges.drop(to: target)
+    HelperLifecycleTrace.mark(
+      startedAt: startedAt, event: "helper privileges dropped",
+      metadata: [
+        "uid": "\(getuid())", "euid": "\(geteuid())",
+        "gid": "\(getgid())", "egid": "\(getegid())",
+        "root_regain_blocked": "true", "pid": "\(getpid())",
+      ]
+    )
+  }
 
   try checked(krun.setVMConfig(context, config.cpus, config.memoryMiB), "krun_set_vm_config")
   HelperLifecycleTrace.mark(startedAt: startedAt, event: "basic VM configuration complete")
@@ -179,28 +221,6 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
     event: "vsock mappings registered",
     metadata: ["mapping_count": "\(config.vsockMappings.count)"]
   )
-
-  for (index, network) in config.networks.enumerated() {
-    guard network.macAddress.count == 6 else {
-      throw KrunError(description: "network \(index) MAC address must contain 6 bytes")
-    }
-    var mac = network.macAddress
-    try withCString(network.socketPath) { path in
-      try mac.withUnsafeMutableBufferPointer { bytes in
-        try checked(
-          krun.addNetUnixgram(
-            context,
-            path,
-            -1,
-            bytes.baseAddress,
-            network.features,
-            network.flags
-          ),
-          "krun_add_net_unixgram(net\(index))"
-        )
-      }
-    }
-  }
 
   try withCString("init") { id in
     try withCString(config.initDisk) { disk in
@@ -280,6 +300,28 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
   }
   HelperLifecycleTrace.mark(startedAt: startedAt, event: "device configuration complete")
 
+  // The runtime stops the per-VM helper with SIGTERM. Convert that process
+  // signal into a libkrun VMM stop event. The VMM event loop runs exit
+  // observers (including native vmnet teardown) before terminating with _exit().
+  signal(SIGTERM, SIG_IGN)
+  let terminationSource = DispatchSource.makeSignalSource(
+    signal: SIGTERM,
+    queue: DispatchQueue(label: "com.github.robertderose.container-runtime-krun.shutdown")
+  )
+  terminationSource.setEventHandler {
+    let result = krun.requestVMMStop(context)
+    HelperLifecycleTrace.mark(
+      startedAt: startedAt,
+      event: "VMM stop requested",
+      metadata: ["result": "\(result)"]
+    )
+  }
+  terminationSource.resume()
+  defer {
+    terminationSource.cancel()
+    signal(SIGTERM, SIG_DFL)
+  }
+
   HelperLifecycleTrace.mark(startedAt: startedAt, event: "krun_start_enter start")
   let result = krun.startEnter(context)
   throw KrunError(description: "krun_start_enter unexpectedly returned \(result)")
@@ -293,10 +335,13 @@ private enum Main {
         throw KrunError(description: "usage: container-krun-vmm-helper CONFIG.json")
       }
       let startedAt = ContinuousClock.now
-      HelperLifecycleTrace.mark(startedAt: startedAt, event: "helper start")
+      HelperLifecycleTrace.mark(
+        startedAt: startedAt, event: "helper start",
+        metadata: ["pid": "\(getpid())", "uid": "\(getuid())", "euid": "\(geteuid())"]
+      )
       let config = try JSONDecoder().decode(
         KrunVMMConfig.self,
-        from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
+        from: NativeVMNetPrivileges.loadConfiguration(path: CommandLine.arguments[1])
       )
       try run(config: config, startedAt: startedAt)
     } catch {

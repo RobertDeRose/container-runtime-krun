@@ -85,6 +85,22 @@ public final class KrunVMController: @unchecked Sendable {
           message: "network config and attachment counts do not match"
         )
       }
+      let nativeVMNet = !networkConfigs.isEmpty
+      let selectedHelper = nativeVMNet ? KrunDefaults.nativeHelperPath : helperPath
+      let selectedLibkrun = nativeVMNet ? KrunDefaults.nativeLibkrunPath : libkrunPath
+      if nativeVMNet {
+        guard getuid() != 0 else {
+          throw ContainerizationError(.unsupported, message: "run Apple Container as an unprivileged user")
+        }
+        if let override = ProcessInfo.processInfo.environment["LIBKRUN_DYLIB"],
+          !override.isEmpty, override != KrunDefaults.nativeLibkrunPath
+        {
+          throw ContainerizationError(
+            .invalidArgument,
+            message: "native vmnet cannot load LIBKRUN_DYLIB from a user path; install the fork with mise run native:install"
+          )
+        }
+      }
       let kernel = try bundle.kernel
       let initfs = bundle.initialFilesystem
       let rootfs = try bundle.containerRootfs
@@ -102,12 +118,12 @@ public final class KrunVMController: @unchecked Sendable {
       )
       try KrunUnixSocketRelays.prepareHostPaths(socketRelays)
 
-      guard FileManager.default.isReadableFile(atPath: helperPath) else {
+      guard FileManager.default.isReadableFile(atPath: selectedHelper) else {
         throw ContainerizationError(
-          .notFound, message: "libkrun helper is not readable at \(helperPath)")
+          .notFound, message: "libkrun helper is not readable at \(selectedHelper); run mise run native:install for native vmnet")
       }
-      guard FileManager.default.isReadableFile(atPath: libkrunPath) else {
-        throw ContainerizationError(.notFound, message: "libkrun is not readable at \(libkrunPath)")
+      guard FileManager.default.isReadableFile(atPath: selectedLibkrun) else {
+        throw ContainerizationError(.notFound, message: "libkrun is not readable at \(selectedLibkrun)")
       }
 
       let layout = KrunSocketLayout(
@@ -131,7 +147,7 @@ public final class KrunVMController: @unchecked Sendable {
       }
 
       let helperConfig = KrunVMMConfig(
-        libkrun: libkrunPath,
+        libkrun: selectedLibkrun,
         kernel: kernel.path.resolvingSymlinksInPath().path,
         initDisk: initfs.source,
         rootDisk: rootfs.source,
@@ -145,14 +161,18 @@ public final class KrunVMController: @unchecked Sendable {
         virtioFS: virtioFSShares.map(\.vmmConfig)
       )
       let helperConfigPath = bundle.filePath(for: "krun-vmm.json")
-      try JSONEncoder().encode(helperConfig).write(to: helperConfigPath)
+      try JSONEncoder().encode(helperConfig).write(to: helperConfigPath, options: .atomic)
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: helperConfigPath.path)
 
       let helperLogPath = bundle.filePath(for: "krun-vmm.log")
       FileManager.default.createFile(atPath: helperLogPath.path, contents: nil)
       let helperLog = try FileHandle(forWritingTo: helperLogPath)
       let helper = Foundation.Process()
-      helper.executableURL = URL(fileURLWithPath: helperPath)
-      helper.arguments = [helperConfigPath.path]
+      helper.executableURL = URL(fileURLWithPath: nativeVMNet ? "/usr/bin/sudo" : selectedHelper)
+      helper.arguments = nativeVMNet
+        ? ["-n", "--", selectedHelper, helperConfigPath.path]
+        : [helperConfigPath.path]
+      helper.standardInput = FileHandle.nullDevice
       helper.standardOutput = helperLog
       helper.standardError = helperLog
       KrunLifecycleTrace.mark(
@@ -599,7 +619,7 @@ public final class KrunVMController: @unchecked Sendable {
   private static func terminate(_ process: Foundation.Process) {
     guard process.isRunning else { return }
     process.terminate()
-    for _ in 0..<20 where process.isRunning {
+    for _ in 0..<100 where process.isRunning {
       Thread.sleep(forTimeInterval: 0.05)
     }
     if process.isRunning {
