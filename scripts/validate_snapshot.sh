@@ -119,6 +119,10 @@ if [[ $? -ne 0 ]]; then pass "export output failure is reported"; else fail "exp
 run after_failure_health container exec "$ID" sh -c 'echo snapshot-health-ok; test -f /snapshot-before.txt' \
   && pass "container remains usable after failed export output" || fail "container remains usable after failed export output"
 
+container system logs --debug --last 5m >"$OUT/system-logs.txt" 2>&1 || true
+grep -E "$ID|snapshotDisk|filesystemOperation" "$OUT/system-logs.txt" \
+  >"$OUT/system-logs-relevant.txt" 2>/dev/null || true
+
 run stop container stop "$ID" && pass "container stopped" || fail "container stopped"
 run delete container delete "$ID" && pass "container deleted" || fail "container deleted"
 wait_cleanup && pass "snapshot runtime/helper cleanup" || fail "snapshot runtime/helper cleanup"

@@ -590,37 +590,62 @@ public actor KrunRuntimeService {
     }
 
     let shouldFreeze = state == .running
+    let filesystemPath = "/"
     if shouldFreeze {
-      try await controller.agent.filesystemOperation(
-        operation: .freeze,
-        path: controller.rootPath
-      )
+      do {
+        try await controller.agent.filesystemOperation(
+          operation: .freeze,
+          path: filesystemPath,
+          containerID: controller.id
+        )
+      } catch {
+        throw ContainerizationError(
+          .internalError,
+          message: "snapshotDisk: failed to freeze \(filesystemPath): \(error)"
+        )
+      }
     }
 
     do {
       try FileManager.default.copyItem(atPath: imagePath, toPath: destinationPath)
     } catch {
+      let copyError = error
       if shouldFreeze {
         do {
           try await controller.agent.filesystemOperation(
             operation: .thaw,
-            path: controller.rootPath
+            path: filesystemPath,
+            containerID: controller.id
           )
         } catch {
           log.error(
-            "failed to thaw filesystem after snapshotDisk error",
-            metadata: ["error": "\(error)"]
+            "failed to thaw filesystem after snapshotDisk copy error",
+            metadata: [
+              "copy_error": "\(copyError)",
+              "thaw_error": "\(error)",
+            ]
           )
         }
       }
-      throw error
+      throw ContainerizationError(
+        .internalError,
+        message: "snapshotDisk: failed to copy \(imagePath) to \(destinationPath): \(copyError)"
+      )
     }
 
     if shouldFreeze {
-      try await controller.agent.filesystemOperation(
-        operation: .thaw,
-        path: controller.rootPath
-      )
+      do {
+        try await controller.agent.filesystemOperation(
+          operation: .thaw,
+          path: filesystemPath,
+          containerID: controller.id
+        )
+      } catch {
+        throw ContainerizationError(
+          .internalError,
+          message: "snapshotDisk: failed to thaw \(filesystemPath): \(error)"
+        )
+      }
     }
     return message.reply()
   }

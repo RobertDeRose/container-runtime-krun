@@ -224,6 +224,31 @@ for required in (
         print(f"clean route is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 
+snapshot_match = re.search(
+    r"public func snapshotDisk\(_ message: XPCMessage\) async throws -> XPCMessage \{(?P<body>.*?)\n  \}",
+    runtime_service,
+    re.DOTALL,
+)
+if snapshot_match is None:
+    print("could not locate snapshotDisk route", file=sys.stderr)
+    raise SystemExit(1)
+snapshot_body = snapshot_match.group("body")
+for required in (
+    'let filesystemPath = "/"',
+    "operation: .freeze",
+    "operation: .thaw",
+    "containerID: controller.id",
+):
+    if required not in snapshot_body:
+        print(f"snapshotDisk route is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+if "path: controller.rootPath" in snapshot_body:
+    print(
+        "snapshotDisk must target / inside the container mount namespace, not the VM staging path",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 
 network_policy = (ROOT / "Sources/KrunRuntimeCore/KrunNetworkPolicy.swift").read_text()
 for required in (
