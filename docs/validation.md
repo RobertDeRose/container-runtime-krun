@@ -234,7 +234,7 @@ Verify each remaining unsupported feature produces an explicit error before VM s
 - request Rosetta;
 - request nested virtualization.
 
-The remaining runtime-only `dial` route must remain fail-closed rather than silently succeeding. Container 1.4.1 has no public CLI surface for `dial`. Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Copy, host bind/virtio-fs mounts, `--init`, published Unix sockets, SSH forwarding, snapshot/export, logs/clean, and multiple networks are covered by dedicated gates instead.
+Rosetta must additionally direct users to Apple's official runtime for x86_64 emulation. Runtime `dial(port)` is supported and is covered by its own behavioral gate. Copy, host bind/virtio-fs mounts, `--init`, published Unix sockets, SSH forwarding, snapshot/export, logs/clean, and multiple networks are covered by dedicated gates instead.
 
 ## Gate 9: v0.3 copy operations
 
@@ -351,3 +351,14 @@ This is a separate one-NIC integration gate, not the old direct-vmnet feasibilit
 probe. It verifies provenance, native ABI use, privilege drop, assigned guest
 configuration, bidirectional packet flow, and cleanup without installing or
 rebuilding anything. See [native setup and evidence](native-vmnet.md).
+
+
+## Gate 18: runtime `dial(port)`
+
+Validate Apple Container's runtime dial contract with:
+
+```bash
+mise run validate:runtime-dial
+```
+
+The validator starts a real guest AF_VSOCK listener, calls the pinned Apple `RuntimeClient.dial(_:)` API, verifies bidirectional bytes across repeated connections, verifies an unused-port failure and a successful dial afterward, checks that the container remains usable, and verifies stop/delete helper cleanup. Results are packaged as `validation-results/container-runtime-krun-runtime-dial-*.tar.gz`.

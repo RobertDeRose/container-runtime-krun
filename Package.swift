@@ -72,6 +72,7 @@ let package = Package(
       dependencies: [
         "KrunRuntimeCore",
         "KrunVMMProtocol",
+        .product(name: "ContainerRuntimeClient", package: "container"),
         .product(name: "ContainerResource", package: "container"),
         .product(name: "ContainerizationExtras", package: "containerization"),
         .product(name: "ContainerizationOCI", package: "containerization"),

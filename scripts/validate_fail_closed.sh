@@ -6,7 +6,6 @@ IMAGE="alpine:3.20"
 INSTALL=0
 RESULT_ROOT="validation-results"
 COMMAND_TIMEOUT_SECONDS=60
-DIAL_HELPER=""
 
 usage() {
   cat <<'USAGE'
@@ -21,10 +20,6 @@ Options:
   --image IMAGE      Test image (default: alpine:3.20).
   --result-root DIR  Output directory (default: validation-results).
   --timeout SECONDS  Per-operation timeout (default: 60).
-  --dial-helper PATH  Optional executable that calls ContainerAPIClient.dial
-                      as: HELPER CONTAINER_ID PORT. When omitted, dial is
-                      reported as SKIP because Container 1.4.1 has no
-                      general-purpose dial CLI command.
   -h, --help         Show this help.
 
 USAGE
@@ -46,10 +41,6 @@ while (($#)); do
       ;;
     --timeout)
       COMMAND_TIMEOUT_SECONDS="${2:?missing value for --timeout}"
-      shift 2
-      ;;
-    --dial-helper)
-      DIAL_HELPER="${2:?missing value for --dial-helper}"
       shift 2
       ;;
     -h|--help)
@@ -80,7 +71,6 @@ STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 PREFIX="krun-gate8-${STAMP}-$$"
 RESULT_DIR="$RESULT_ROOT/gate8-${STAMP}-$$"
 ARCHIVE="$RESULT_ROOT/container-runtime-krun-gate8-${STAMP}-$$.tar.gz"
-ROUTE_ID="$PREFIX-routes"
 INITIAL_SOCKETS="$RESULT_DIR/initial-sockets.txt"
 mkdir -p "$RESULT_DIR"
 
@@ -396,76 +386,7 @@ check_config_rejections_did_not_start_vms
 capture_runtime_state "$RESULT_DIR/runtime-state-after-feature-gates.txt"
 check_no_new_sockets feature_gates
 
-# Runtime-route gates need a live, otherwise-supported container so the API
-# server actually forwards each request to container-runtime-krun.
-CLEANUP_IDS+=("$ROUTE_ID")
-if run_capture_timeout route-container-start "$COMMAND_TIMEOUT_SECONDS" \
-  container run -d \
-    --name "$ROUTE_ID" \
-    --runtime "$RUNTIME" \
-    --network none \
-    "$IMAGE" sh -c 'while :; do sleep 1; done'; then
-  pass "runtime-route container started"
-else
-  fail "runtime-route container started"
-fi
-
-if run_capture_timeout route-container-live "$COMMAND_TIMEOUT_SECONDS" \
-  container exec "$ROUTE_ID" true; then
-  pass "runtime-route container is usable before unsupported-route probes"
-else
-  fail "runtime-route container is usable before unsupported-route probes"
-fi
-container inspect "$ROUTE_ID" >"$RESULT_DIR/route-container-inspect.txt" 2>&1 || true
-capture_runtime_state "$RESULT_DIR/runtime-state-routes-live.txt"
-
-# Container 1.4.1 has no general-purpose CLI command for ContainerClient.dial.
-# An externally supplied validation helper may exercise it without forcing this
-# script to compile a second Apple Container dependency graph.
-if [[ -n "$DIAL_HELPER" ]]; then
-  if [[ -x "$DIAL_HELPER" ]]; then
-    expect_unsupported \
-      route-dial \
-      "container-runtime-krun does not support runtime route dial" \
-      "$DIAL_HELPER" "$ROUTE_ID" 12345
-  else
-    fail "dial helper is not executable: $DIAL_HELPER"
-  fi
-else
-  skip "route-dial not behaviorally reachable: Container 1.4.1 has no general-purpose dial CLI command"
-fi
-
-# The route probes must fail without damaging the live container.
-if run_capture_timeout route-container-still-live "$COMMAND_TIMEOUT_SECONDS" \
-  container exec "$ROUTE_ID" sh -c 'printf gate8-route-container-ok'; then
-  if grep -Fq 'gate8-route-container-ok' "$RESULT_DIR/route-container-still-live.txt"; then
-    pass "unsupported runtime routes leave the container usable"
-  else
-    fail "unsupported runtime routes leave the container usable"
-  fi
-else
-  fail "unsupported runtime routes leave the container usable"
-fi
-
-if run_capture_timeout route-container-stop "$COMMAND_TIMEOUT_SECONDS" \
-  container stop "$ROUTE_ID"; then
-  pass "runtime-route container stopped"
-else
-  fail "runtime-route container stopped"
-fi
-if run_capture_timeout route-container-delete "$COMMAND_TIMEOUT_SECONDS" \
-  container delete "$ROUTE_ID"; then
-  pass "runtime-route container deleted"
-else
-  fail "runtime-route container deleted"
-fi
-
-if wait_for_runtime_cleanup "$ROUTE_ID" 10; then
-  pass "runtime-route helpers cleaned up"
-else
-  fail "runtime-route helpers cleaned up"
-fi
-
+# Runtime dial is supported and has a dedicated behavioral validator.
 capture_runtime_state "$RESULT_DIR/runtime-state-final.txt"
 check_no_new_sockets final_cleanup
 
@@ -488,15 +409,11 @@ grep -E "$PREFIX|container-runtime-krun does not support" \
   echo "runtime=$RUNTIME"
   echo "image=$IMAGE"
   echo "feature_gate_cases=${#CONFIG_IDS[@]}"
-  echo "runtime_route_cases=1"
+  echo "runtime_route_cases=0"
   echo "passes=$PASSES"
   echo "skips=$SKIPS"
   echo "failures=$FAILURES"
-  if [[ -n "$DIAL_HELPER" ]]; then
-    echo "dial_validation=external helper: $DIAL_HELPER"
-  else
-    echo "dial_validation=skipped: no public Container 1.4.1 dial CLI"
-  fi
+  echo "dial_validation=dedicated: mise run validate:runtime-dial"
 } >"$RESULT_DIR/SUMMARY.txt"
 
 mkdir -p "$RESULT_ROOT"

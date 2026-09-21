@@ -158,3 +158,7 @@ run = "scripts/validate_native_vmnet_acceptance.sh"
 description = "Validate host-initiated vsock dial behavior in the managed libkrun fork"
 depends = ["libkrun"]
 run = "scripts/validate_libkrun_vsock_dial.sh"
+
+[tasks."validate:runtime-dial"]
+description = "Validate RuntimeClient.dial against an actual guest AF_VSOCK listener"
+run = "scripts/validate_runtime_dial.sh"
