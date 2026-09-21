@@ -210,9 +210,16 @@ time.sleep(300)
 PY
 )
 
-require_run start "dial test container started" \
+if run start \
   container run -d --name "$ID" --runtime "$RUNTIME" --network "$NETWORK" \
-    "$IMAGE" python3 -u -c "$PY_SERVER" "$PORT"
+    "$IMAGE" python3 -u -c "$PY_SERVER" "$PORT"; then
+  pass "dial test container started"
+else
+  fail "dial test container started"
+  capture_diagnostics start-failed
+  finish
+  exit 1
+fi
 
 ready_deadline=$((SECONDS + 20))
 while ((SECONDS < ready_deadline)); do
