@@ -65,6 +65,7 @@ private final class KrunLibrary: @unchecked Sendable {
       UnsafePointer<CChar>?
     ) -> Int32
   typealias RequestVMMStop = @convention(c) (UInt32) -> Int32
+  typealias VsockConnect = @convention(c) (UInt32, UInt32) -> Int32
   typealias StartEnter = @convention(c) (UInt32) -> Int32
 
   private let handle: UnsafeMutableRawPointer
@@ -83,6 +84,7 @@ private final class KrunLibrary: @unchecked Sendable {
   let addConsole: AddConsole
   let setKernel: SetKernel
   let requestVMMStop: RequestVMMStop
+  let vsockConnect: VsockConnect
   let startEnter: StartEnter
 
   init(path: String) throws {
@@ -109,6 +111,7 @@ private final class KrunLibrary: @unchecked Sendable {
     self.addConsole = try Self.load(handle, "krun_add_virtio_console_default", as: AddConsole.self)
     self.setKernel = try Self.load(handle, "krun_set_kernel", as: SetKernel.self)
     self.requestVMMStop = try Self.load(handle, "krun_request_vmm_stop", as: RequestVMMStop.self)
+    self.vsockConnect = try Self.load(handle, "krun_vsock_connect", as: VsockConnect.self)
     self.startEnter = try Self.load(handle, "krun_start_enter", as: StartEnter.self)
   }
 
@@ -144,6 +147,50 @@ private func withCString<Result>(_ value: String, _ body: (UnsafePointer<CChar>)
   rethrows -> Result
 {
   try value.withCString(body)
+}
+
+private func serveControlChannel(
+  krun: KrunLibrary,
+  context: UInt32,
+  startedAt: ContinuousClock.Instant
+) {
+  while true {
+    do {
+      guard let request = try KrunVMMControlChannel.receiveRequest(from: STDIN_FILENO) else {
+        return
+      }
+      switch request {
+      case .dial(let port):
+        let result = krun.vsockConnect(context, port)
+        if result < 0 {
+          try KrunVMMControlChannel.sendDialResponse(
+            to: STDIN_FILENO,
+            result: result,
+            connectedFD: nil
+          )
+          continue
+        }
+        do {
+          try KrunVMMControlChannel.sendDialResponse(
+            to: STDIN_FILENO,
+            result: 0,
+            connectedFD: result
+          )
+        } catch {
+          close(result)
+          throw error
+        }
+        close(result)
+      }
+    } catch {
+      HelperLifecycleTrace.mark(
+        startedAt: startedAt,
+        event: "VMM control channel closed",
+        metadata: ["error": "\(error)"]
+      )
+      return
+    }
+  }
 }
 
 private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) throws -> Never {
@@ -321,6 +368,12 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
   defer {
     terminationSource.cancel()
     signal(SIGTERM, SIG_DFL)
+  }
+
+  DispatchQueue(
+    label: "com.github.robertderose.container-runtime-krun.vmm-control"
+  ).async {
+    serveControlChannel(krun: krun, context: context, startedAt: startedAt)
   }
 
   HelperLifecycleTrace.mark(startedAt: startedAt, event: "krun_start_enter start")

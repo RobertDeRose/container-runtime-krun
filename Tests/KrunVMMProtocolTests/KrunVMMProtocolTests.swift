@@ -107,3 +107,55 @@ import Testing
     #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
   }
 }
+
+#if canImport(Darwin)
+  import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#endif
+
+@Test func vmmControlChannelTransfersDialFileDescriptor() throws {
+  let pair = try KrunVMMControlChannel.makeSocketPair()
+  defer {
+    try? pair.runtime.close()
+    try? pair.helper.close()
+  }
+
+  try KrunVMMControlChannel.sendDialRequest(to: pair.runtime.fileDescriptor, port: 43210)
+  #expect(
+    try KrunVMMControlChannel.receiveRequest(from: pair.helper.fileDescriptor)
+      == .dial(port: 43210)
+  )
+
+  let sourceFD = open("/dev/null", O_RDONLY)
+  #expect(sourceFD >= 0)
+  defer { close(sourceFD) }
+  try KrunVMMControlChannel.sendDialResponse(
+    to: pair.helper.fileDescriptor,
+    result: 0,
+    connectedFD: sourceFD
+  )
+  let received = try KrunVMMControlChannel.receiveDialResponse(from: pair.runtime.fileDescriptor)
+  defer { try? received.close() }
+  #expect(fcntl(received.fileDescriptor, F_GETFD) >= 0)
+}
+
+@Test func vmmControlChannelPreservesDialErrno() throws {
+  let pair = try KrunVMMControlChannel.makeSocketPair()
+  defer {
+    try? pair.runtime.close()
+    try? pair.helper.close()
+  }
+
+  try KrunVMMControlChannel.sendDialResponse(
+    to: pair.helper.fileDescriptor,
+    result: -ECONNREFUSED,
+    connectedFD: nil
+  )
+  do {
+    _ = try KrunVMMControlChannel.receiveDialResponse(from: pair.runtime.fileDescriptor)
+    Issue.record("expected ECONNREFUSED")
+  } catch let error as POSIXError {
+    #expect(error.code == .ECONNREFUSED)
+  }
+}

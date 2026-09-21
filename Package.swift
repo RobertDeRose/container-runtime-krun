@@ -27,7 +27,8 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-system.git", exact: swiftSystemVersion),
   ],
   targets: [
-    .target(name: "KrunVMMProtocol"),
+    .target(name: "KrunVMMIPC"),
+    .target(name: "KrunVMMProtocol", dependencies: ["KrunVMMIPC"]),
     .target(
       name: "KrunRuntimeCore",
       dependencies: [

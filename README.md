@@ -35,7 +35,7 @@ v0.4.0 establishes the lifecycle, networking, host-integration, and selected par
 | Apple named/anonymous volumes | yes, libkrun virtio-blk |
 | Host bind/virtiofs mounts | yes, libkrun virtio-fs with read-write/read-only support |
 | Published Unix sockets | yes, fixed libkrun vsock mappings + vminitd relay |
-| Arbitrary runtime `dial(port)` | no |
+| Arbitrary runtime `dial(port)` | yes, dynamic host-to-guest libkrun vsock |
 | `copyIn` / `copyOut` | yes, dedicated predeclared vsock pool |
 | Disk snapshot / export | yes, live rootfs export |
 | Persistent `container logs` | yes, init stdout/stderr plus VM boot log |

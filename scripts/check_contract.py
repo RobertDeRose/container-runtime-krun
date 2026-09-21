@@ -54,6 +54,7 @@ required_symbols = {
     "krun_disable_implicit_console",
     "krun_add_virtio_console_default",
     "krun_set_kernel",
+    "krun_vsock_connect",
     "krun_start_enter",
 }
 missing_symbols = sorted(symbol for symbol in required_symbols if f'"{symbol}"' not in helper)
@@ -70,6 +71,12 @@ if "ContainerNetworkClient" not in (ROOT / "Package.swift").read_text():
     raise SystemExit(1)
 
 runtime_service = (ROOT / "Sources/KrunRuntimeCore/KrunRuntimeService.swift").read_text()
+if "controller.dialVsock(port: UInt32(port))" not in runtime_service:
+    print("runtime dial route is not wired to the live libkrun VMM", file=sys.stderr)
+    raise SystemExit(1)
+if "reply.set(key: RuntimeKeys.fd.rawValue, value: handle)" not in runtime_service:
+    print("runtime dial route does not return the connected file descriptor", file=sys.stderr)
+    raise SystemExit(1)
 cleanup_match = re.search(
     r"private func cleanupContainer\(\) async \{(?P<body>.*?)\n  \}",
     runtime_service,

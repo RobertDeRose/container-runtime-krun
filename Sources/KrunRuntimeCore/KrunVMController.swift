@@ -29,6 +29,10 @@ public final class KrunVMController: @unchecked Sendable {
   }
 
   private let helper: Foundation.Process
+  private let helperControl: FileHandle
+  private let controlQueue = DispatchQueue(
+    label: "com.github.robertderose.container-runtime-krun.vmm-control"
+  )
   let eventLoopGroup: MultiThreadedEventLoopGroup
   private let log: Logger
   private let helperLogHandle: FileHandle
@@ -44,6 +48,7 @@ public final class KrunVMController: @unchecked Sendable {
     virtioFSShares: [KrunVirtioFSShare],
     socketRelays: [KrunUnixSocketRelay],
     helper: Foundation.Process,
+    helperControl: FileHandle,
     group: MultiThreadedEventLoopGroup,
     log: Logger,
     helperLogHandle: FileHandle
@@ -58,6 +63,7 @@ public final class KrunVMController: @unchecked Sendable {
     self.virtioFSShares = virtioFSShares
     self.socketRelays = socketRelays
     self.helper = helper
+    self.helperControl = helperControl
     self.eventLoopGroup = group
     self.log = log
     self.helperLogHandle = helperLogHandle
@@ -167,12 +173,13 @@ public final class KrunVMController: @unchecked Sendable {
       let helperLogPath = bundle.filePath(for: "krun-vmm.log")
       FileManager.default.createFile(atPath: helperLogPath.path, contents: nil)
       let helperLog = try FileHandle(forWritingTo: helperLogPath)
+      let controlPair = try KrunVMMControlChannel.makeSocketPair()
       let helper = Foundation.Process()
       helper.executableURL = URL(fileURLWithPath: nativeVMNet ? "/usr/bin/sudo" : selectedHelper)
       helper.arguments = nativeVMNet
         ? ["-n", "--", selectedHelper, helperConfigPath.path]
         : [helperConfigPath.path]
-      helper.standardInput = FileHandle.nullDevice
+      helper.standardInput = controlPair.helper
       helper.standardOutput = helperLog
       helper.standardError = helperLog
       KrunLifecycleTrace.mark(
@@ -180,7 +187,14 @@ public final class KrunVMController: @unchecked Sendable {
         startedAt: lifecycleStartedAt,
         event: "libkrun helper launch"
       )
-      try helper.run()
+      do {
+        try helper.run()
+      } catch {
+        try? controlPair.runtime.close()
+        try? controlPair.helper.close()
+        throw error
+      }
+      try? controlPair.helper.close()
       KrunLifecycleTrace.mark(
         log,
         startedAt: lifecycleStartedAt,
@@ -304,6 +318,7 @@ public final class KrunVMController: @unchecked Sendable {
           virtioFSShares: virtioFSShares,
           socketRelays: socketRelays,
           helper: helper,
+          helperControl: controlPair.runtime,
           group: group,
           log: log,
           helperLogHandle: helperLog
@@ -324,6 +339,7 @@ public final class KrunVMController: @unchecked Sendable {
           try? await cleanupAgent.sync()
           try? await cleanupAgent.close()
         }
+        try? controlPair.runtime.close()
         terminate(helper)
         KrunUnixSocketRelays.cleanupHostPaths(socketRelays)
         try? helperLog.close()
@@ -372,9 +388,29 @@ public final class KrunVMController: @unchecked Sendable {
     )
   }
 
+  public func dialVsock(port: UInt32) async throws -> FileHandle {
+    let helper = self.helper
+    let controlFD = helperControl.fileDescriptor
+    return try await withCheckedThrowingContinuation { continuation in
+      controlQueue.async {
+        do {
+          guard helper.isRunning else {
+            throw ContainerizationError(.invalidState, message: "libkrun helper is not running")
+          }
+          try KrunVMMControlChannel.sendDialRequest(to: controlFD, port: port)
+          let handle = try KrunVMMControlChannel.receiveDialResponse(from: controlFD)
+          continuation.resume(returning: handle)
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+  }
+
   public func shutdownVMM() async {
     await stopSocketRelays()
     try? await agent.close()
+    try? helperControl.close()
     Self.terminate(helper)
     KrunUnixSocketRelays.cleanupHostPaths(socketRelays)
     try? helperLogHandle.close()

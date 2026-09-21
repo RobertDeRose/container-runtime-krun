@@ -472,7 +472,21 @@ public actor KrunRuntimeService {
   }
 
   @Sendable public func dial(_ message: XPCMessage) async throws -> XPCMessage {
-    throw unsupported("dial")
+    guard state == .running || state == .booted else {
+      throw ContainerizationError(.invalidState, message: "cannot dial: container is not running")
+    }
+    let port = message.uint64(key: RuntimeKeys.port.rawValue)
+    guard port > 0, port <= UInt64(UInt32.max) else {
+      throw ContainerizationError(.invalidArgument, message: "no vsock port supplied for dial")
+    }
+    guard let controller = vm else {
+      throw ContainerizationError(.invalidState, message: "runtime is not booted")
+    }
+
+    let handle = try await controller.dialVsock(port: UInt32(port))
+    let reply = message.reply()
+    reply.set(key: RuntimeKeys.fd.rawValue, value: handle)
+    return reply
   }
 
   @Sendable
