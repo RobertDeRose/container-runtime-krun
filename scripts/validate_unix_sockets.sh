@@ -169,6 +169,20 @@ wait_for_socket() {
   return 1
 }
 
+wait_for_guest_socket() {
+  local id="$1"
+  local path="$2"
+  local timeout_seconds="${3:-20}"
+  local deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    if container exec "$id" test -S "$path" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 wait_for_path_absent() {
   local path="$1"
   local timeout_seconds="${2:-15}"
@@ -346,11 +360,18 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(10)
 sock.connect(path)
 sock.sendall(message.encode())
-data = sock.recv(65536).decode()
+expected_bytes = expected.encode()
+data = bytearray()
+while len(data) < len(expected_bytes):
+    chunk = sock.recv(len(expected_bytes) - len(data))
+    if not chunk:
+        break
+    data.extend(chunk)
 sock.close()
-print(data)
-if data != expected:
-    raise SystemExit(1)
+received = bytes(data)
+print(received.decode(errors="replace"))
+if received != expected_bytes:
+    raise SystemExit(f"expected {expected_bytes!r}, got {received!r}")
 PY
 }
 
@@ -368,11 +389,18 @@ def one(i):
     sock.settimeout(10)
     sock.connect(path)
     sock.sendall(payload.encode())
-    data = sock.recv(65536).decode()
+    expected = f"container:{payload}".encode()
+    data = bytearray()
+    while len(data) < len(expected):
+        chunk = sock.recv(len(expected) - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
     sock.close()
-    if data != f"container:{payload}":
-        raise RuntimeError((payload, data))
-    return data
+    received = bytes(data)
+    if received != expected:
+        raise RuntimeError((payload, received))
+    return received.decode()
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
     results = list(pool.map(one, range(4)))
@@ -445,7 +473,9 @@ expect_success published_start \
     --publish-socket "$HOST_PUBLISHED:/tmp/service.sock" \
     --env SOCKET_PATH=/tmp/service.sock \
     "$IMAGE" python3 -u -c "$PY_SERVER"
-if wait_for_state "$PUB_ID" running 20 && wait_for_socket "$HOST_PUBLISHED" 20; then
+if wait_for_state "$PUB_ID" running 20 \
+    && wait_for_socket "$HOST_PUBLISHED" 20 \
+    && wait_for_guest_socket "$PUB_ID" /tmp/service.sock 20; then
   pass "published Unix socket became ready"
 else
   fail "published Unix socket became ready"
@@ -485,7 +515,9 @@ expect_success volume_socket_start \
     --publish-socket "$HOST_VOLUME_PUBLISHED:/data/service.sock" \
     --env SOCKET_PATH=/data/service.sock \
     "$IMAGE" python3 -u -c "$PY_SERVER"
-if wait_for_state "$VOLUME_ID" running 20 && wait_for_socket "$HOST_VOLUME_PUBLISHED" 20; then
+if wait_for_state "$VOLUME_ID" running 20 \
+    && wait_for_socket "$HOST_VOLUME_PUBLISHED" 20 \
+    && wait_for_guest_socket "$VOLUME_ID" /data/service.sock 20; then
   pass "volume-backed published socket became ready"
 else
   fail "volume-backed published socket became ready"
