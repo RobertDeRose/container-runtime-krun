@@ -114,7 +114,7 @@ import Testing
   import Glibc
 #endif
 
-@Test func vmmControlChannelUsesDatagramSocketPair() throws {
+@Test func vmmControlChannelUsesStreamSocketPair() throws {
   let pair = try KrunVMMControlChannel.makeSocketPair()
   defer {
     try? pair.runtime.close()
@@ -129,8 +129,30 @@ import Testing
         handle.fileDescriptor, SOL_SOCKET, SO_TYPE, &socketType, &length
       ) == 0
     )
-    #expect(socketType == SOCK_DGRAM)
+    #expect(socketType == SOCK_STREAM)
   }
+}
+
+@Test func vmmControlChannelCanBackProcessStandardInput() throws {
+  let pair = try KrunVMMControlChannel.makeSocketPair()
+  let output = Pipe()
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/cat")
+  process.standardInput = pair.helper
+  process.standardOutput = output
+  process.standardError = FileHandle.nullDevice
+
+  try process.run()
+  try pair.helper.close()
+  let payload = Data("control-stream\n".utf8)
+  try pair.runtime.write(contentsOf: payload)
+  #expect(shutdown(pair.runtime.fileDescriptor, SHUT_WR) == 0)
+  process.waitUntilExit()
+
+  let echoed = output.fileHandleForReading.readDataToEndOfFile()
+  #expect(process.terminationStatus == 0)
+  #expect(echoed == payload)
+  try pair.runtime.close()
 }
 
 @Test func vmmControlChannelTransfersDialFileDescriptor() throws {
