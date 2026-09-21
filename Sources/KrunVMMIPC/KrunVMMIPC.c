@@ -39,7 +39,7 @@ int32_t krun_vmm_ipc_socketpair(int32_t fds[2]) {
     }
 
     int pair[2] = {-1, -1};
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair) < 0) {
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) < 0) {
         return neg_errno();
     }
 

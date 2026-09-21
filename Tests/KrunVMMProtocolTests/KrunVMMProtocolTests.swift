@@ -114,6 +114,25 @@ import Testing
   import Glibc
 #endif
 
+@Test func vmmControlChannelUsesDatagramSocketPair() throws {
+  let pair = try KrunVMMControlChannel.makeSocketPair()
+  defer {
+    try? pair.runtime.close()
+    try? pair.helper.close()
+  }
+
+  for handle in [pair.runtime, pair.helper] {
+    var socketType: Int32 = 0
+    var length = socklen_t(MemoryLayout.size(ofValue: socketType))
+    #expect(
+      getsockopt(
+        handle.fileDescriptor, SOL_SOCKET, SO_TYPE, &socketType, &length
+      ) == 0
+    )
+    #expect(socketType == SOCK_DGRAM)
+  }
+}
+
 @Test func vmmControlChannelTransfersDialFileDescriptor() throws {
   let pair = try KrunVMMControlChannel.makeSocketPair()
   defer {
