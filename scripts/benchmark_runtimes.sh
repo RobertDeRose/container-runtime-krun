@@ -4,6 +4,12 @@ set -uo pipefail
 RUNTIME_A="container-runtime-linux"
 RUNTIME_B="container-runtime-krun"
 IMAGE="alpine:3.20"
+NETWORK="default"
+NETWORK_IMAGE="python:3.13-alpine"
+NETWORK_PAYLOAD_MIB=16
+MULTINIC_SUBNET_A="10.250.50.0/24"
+MULTINIC_SUBNET_B="10.250.51.0/24"
+DIAL_PORT=43210
 ITERATIONS=5
 RESULT_ROOT="validation-results"
 INSTALL_KRUN=0
@@ -18,14 +24,19 @@ usage(){ cat <<'USAGE'
 Usage: scripts/benchmark_runtimes.sh [options]
 
 Collect repeatable, non-gating comparisons between Apple's default runtime and
-container-runtime-krun. Raw samples are retained; no performance threshold is
-enforced.
+container-runtime-krun, including networking and RuntimeClient.dial. Raw samples
+are retained; no performance threshold is enforced.
 
 Options:
   --install-krun      Build/install krun and restart Apple Container first.
   --runtime-a NAME    Baseline runtime (default: container-runtime-linux).
   --runtime-b NAME    Comparison runtime (default: container-runtime-krun).
   --image IMAGE       Warm test image (default: alpine:3.20).
+  --network NAME      Network used for network samples (default: default).
+  --network-image I   Python image used for network/dial samples (default: python:3.13-alpine).
+  --network-payload N MiB transferred in each network throughput sample (default: 16).
+  --multinic-subnet-a CIDR  First temporary multi-NIC subnet (default: 10.250.50.0/24).
+  --multinic-subnet-b CIDR  Second temporary multi-NIC subnet (default: 10.250.51.0/24).
   --iterations N      Samples per repeated metric (default: 5).
   --startup-memory N  Override memory only for startup samples (for example: 512m or 2g).
   --startup-cpus N    Override CPU count only for startup samples.
@@ -42,6 +53,11 @@ while (($#)); do
     --runtime-a) RUNTIME_A="${2:?missing runtime}"; shift 2;;
     --runtime-b) RUNTIME_B="${2:?missing runtime}"; shift 2;;
     --image) IMAGE="${2:?missing image}"; shift 2;;
+    --network) NETWORK="${2:?missing network}"; shift 2;;
+    --network-image) NETWORK_IMAGE="${2:?missing network image}"; shift 2;;
+    --network-payload) NETWORK_PAYLOAD_MIB="${2:?missing network payload}"; shift 2;;
+    --multinic-subnet-a) MULTINIC_SUBNET_A="${2:?missing subnet}"; shift 2;;
+    --multinic-subnet-b) MULTINIC_SUBNET_B="${2:?missing subnet}"; shift 2;;
     --iterations) ITERATIONS="${2:?missing iterations}"; shift 2;;
     --startup-memory) STARTUP_MEMORY="${2:?missing startup memory}"; shift 2;;
     --startup-cpus) STARTUP_CPUS="${2:?missing startup CPU count}"; shift 2;;
@@ -54,9 +70,10 @@ while (($#)); do
   esac
 done
 [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || { echo "--iterations must be positive" >&2; exit 2; }
+[[ "$NETWORK_PAYLOAD_MIB" =~ ^[1-9][0-9]*$ ]] || { echo "--network-payload must be positive" >&2; exit 2; }
 [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "--command-timeout must be positive" >&2; exit 2; }
 [[ -z "$STARTUP_CPUS" || "$STARTUP_CPUS" =~ ^[1-9][0-9]*$ ]] || { echo "--startup-cpus must be positive" >&2; exit 2; }
-for c in container python3 git mise ps dd; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
+for c in container python3 git mise ps dd swift; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
 
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 PREFIX="kb-${STAMP}-$$"
@@ -440,6 +457,12 @@ PY
   echo "runtime_a=$RUNTIME_A"
   echo "runtime_b=$RUNTIME_B"
   echo "image=$IMAGE"
+  echo "network=$NETWORK"
+  echo "network_image=$NETWORK_IMAGE"
+  echo "network_payload_mib=$NETWORK_PAYLOAD_MIB"
+  echo "multinic_subnet_a=$MULTINIC_SUBNET_A"
+  echo "multinic_subnet_b=$MULTINIC_SUBNET_B"
+  echo "dial_port=$DIAL_PORT"
   echo "iterations=$ITERATIONS"
   echo "startup_memory=$STARTUP_MEMORY"
   echo "startup_cpus=$STARTUP_CPUS"
@@ -448,6 +471,7 @@ PY
   echo "ordering=paired-ab-ba"
   echo "startup_scope=detached-start-only"
   echo "volume_scope=persistent-container-exec"
+  echo "network_scope=one-nic-and-two-nic-lifecycle,direct-transfer,published-ports,vsock-dial"
   echo "command_timeout_seconds=$COMMAND_TIMEOUT_SECONDS"
 } >"$OUT/environment.txt"
 
@@ -591,6 +615,26 @@ for ((i=1; i<=ITERATIONS; i++)); do
     rm -f "$OUT/${key}-copy-out-$i.bin"
   done
 done
+
+progress "paired native-network and RuntimeClient.dial samples"
+if ! python3 scripts/benchmark_network_metrics.py \
+    --samples "$SAMPLES" \
+    --output "$OUT/network" \
+    --prefix "$PREFIX" \
+    --runtime-a "$RUNTIME_A" \
+    --runtime-b "$RUNTIME_B" \
+    --image "$IMAGE" \
+    --network "$NETWORK" \
+    --network-image "$NETWORK_IMAGE" \
+    --payload-mib "$NETWORK_PAYLOAD_MIB" \
+    --iterations "$ITERATIONS" \
+    --subnet-a "$MULTINIC_SUBNET_A" \
+    --subnet-b "$MULTINIC_SUBNET_B" \
+    --dial-port "$DIAL_PORT" \
+    --timeout "$COMMAND_TIMEOUT_SECONDS" \
+    >"$OUT/network-benchmark.txt" 2>&1; then
+  FAILED=1
+fi
 
 # Record reclaimability without turning host RSS behavior into a pass/fail threshold.
 for runtime in "$RUNTIME_A" "$RUNTIME_B"; do
