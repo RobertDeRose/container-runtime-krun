@@ -11,7 +11,7 @@ LIBKRUN_FEATURES = "BLK=1 NET=1"
 
 [tasks.build]
 description = "Build the runtime in debug mode"
-sources = ["Package.swift", "Package.resolved", "Sources/**/*.swift"]
+sources = ["Package.swift", "Package.resolved", "Sources/**/*"]
 outputs = [
   ".build/arm64-apple-macosx/debug/container-runtime-krun",
   ".build/arm64-apple-macosx/debug/container-krun-vmm-helper",
@@ -24,7 +24,7 @@ run = "scripts/build_native_libkrun.sh"
 
 [tasks."release:build"]
 description = "Build the arm64 runtime release binaries"
-sources = ["Package.swift", "Package.resolved", "Sources/**/*.swift"]
+sources = ["Package.swift", "Package.resolved", "Sources/**/*"]
 outputs = [
   ".build/arm64-apple-macosx/release/container-runtime-krun",
   ".build/arm64-apple-macosx/release/container-krun-vmm-helper",

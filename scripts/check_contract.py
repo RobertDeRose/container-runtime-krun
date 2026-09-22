@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 main = (ROOT / "Sources/KrunRuntimePlugin/main.swift").read_text()
@@ -15,6 +16,17 @@ if (helper_directory / "main.swift").exists():
     raise SystemExit(1)
 helper = (helper_directory / "KrunVMMHelperMain.swift").read_text()
 config = (ROOT / "plugin/container-runtime-krun/config.toml").read_text()
+
+with (ROOT / "mise.toml").open("rb") as stream:
+    mise = tomllib.load(stream)
+for task_name in ("build", "release:build"):
+    sources = mise["tasks"][task_name].get("sources", [])
+    if "Sources/**/*" not in sources:
+        print(
+            f"mise task {task_name} must track all Sources files so C/header changes rebuild SwiftPM products",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 routes = {
     "bootstrap",
