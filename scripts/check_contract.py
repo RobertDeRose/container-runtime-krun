@@ -28,6 +28,14 @@ for task_name in ("build", "release:build"):
         )
         raise SystemExit(1)
 
+runtime_dial_task = mise["tasks"]["validate:runtime-dial"]
+if runtime_dial_task.get("run") != "scripts/validate_runtime_dial.sh --install":
+    print(
+        "mise task validate:runtime-dial must install this checkout before behavioral validation",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 routes = {
     "bootstrap",
     "createProcess",

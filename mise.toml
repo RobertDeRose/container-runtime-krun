@@ -161,4 +161,4 @@ run = "scripts/validate_libkrun_vsock_dial.sh"
 
 [tasks."validate:runtime-dial"]
 description = "Validate RuntimeClient.dial against an actual guest AF_VSOCK listener"
-run = "scripts/validate_runtime_dial.sh"
+run = "scripts/validate_runtime_dial.sh --install"
