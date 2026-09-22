@@ -36,6 +36,21 @@ if runtime_dial_task.get("run") != "scripts/validate_runtime_dial.sh --install":
     )
     raise SystemExit(1)
 
+benchmark_task = mise["tasks"]["benchmark:runtimes"]
+if benchmark_task.get("run") != "scripts/benchmark_runtimes.sh":
+    print(
+        "mise task benchmark:runtimes must measure the installed runtimes without performing a privileged install",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+benchmark_script = (ROOT / "scripts/benchmark_runtimes.sh").read_text()
+if "--install-krun" in benchmark_script or "mise run install" in benchmark_script:
+    print(
+        "runtime benchmark must not install or restart the runtime under its bounded measurement harness",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 routes = {
     "bootstrap",
     "createProcess",

@@ -89,8 +89,8 @@ description = "Capture paired Apple/VZ and krun CPU startup profiles"
 run = "scripts/profile_runtime_cpu.sh"
 
 [tasks."benchmark:runtimes"]
-description = "Benchmark Apple/VZ and krun runtime, networking, and vsock dial behavior"
-run = "scripts/benchmark_runtimes.sh --install-krun"
+description = "Benchmark the installed Apple/VZ and krun runtimes, networking, and vsock dial behavior"
+run = "scripts/benchmark_runtimes.sh"
 
 [tasks.test]
 description = "Run the Swift test suite"

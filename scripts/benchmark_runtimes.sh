@@ -12,7 +12,6 @@ MULTINIC_SUBNET_B="10.250.51.0/24"
 DIAL_PORT=43210
 ITERATIONS=5
 RESULT_ROOT="validation-results"
-INSTALL_KRUN=0
 COMMAND_TIMEOUT_SECONDS=180
 CLEANUP_TIMEOUT_SECONDS=30
 STARTUP_MEMORY=""
@@ -28,7 +27,6 @@ container-runtime-krun, including networking and RuntimeClient.dial. Raw samples
 are retained; no performance threshold is enforced.
 
 Options:
-  --install-krun      Build/install krun and restart Apple Container first.
   --runtime-a NAME    Baseline runtime (default: container-runtime-linux).
   --runtime-b NAME    Comparison runtime (default: container-runtime-krun).
   --image IMAGE       Warm test image (default: alpine:3.20).
@@ -49,7 +47,6 @@ USAGE
 }
 while (($#)); do
   case "$1" in
-    --install-krun) INSTALL_KRUN=1; shift;;
     --runtime-a) RUNTIME_A="${2:?missing runtime}"; shift 2;;
     --runtime-b) RUNTIME_B="${2:?missing runtime}"; shift 2;;
     --image) IMAGE="${2:?missing image}"; shift 2;;
@@ -474,15 +471,6 @@ PY
   echo "network_scope=one-nic-and-two-nic-lifecycle,direct-transfer,published-ports,vsock-dial"
   echo "command_timeout_seconds=$COMMAND_TIMEOUT_SECONDS"
 } >"$OUT/environment.txt"
-
-if ((INSTALL_KRUN)); then
-  run_required mise-doctor mise run doctor
-  run_required mise-check mise run check
-  run_required mise-test mise run test
-  run_required mise-install mise run install
-  run_required system-stop container system stop
-  run_required system-start container system start
-fi
 
 capture_libkrun_provenance
 
