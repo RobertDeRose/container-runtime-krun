@@ -44,6 +44,13 @@ if benchmark_task.get("run") != "scripts/benchmark_runtimes.sh":
     )
     raise SystemExit(1)
 benchmark_script = (ROOT / "scripts/benchmark_runtimes.sh").read_text()
+benchmark_network_script = (ROOT / "scripts/benchmark_network_metrics.py").read_text()
+if "network_prefix = args.prefix.lower()" not in benchmark_network_script:
+    print(
+        "network benchmark must normalize generated Apple Container network names to lowercase",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 if "--install-krun" in benchmark_script or "mise run install" in benchmark_script:
     print(
         "runtime benchmark must not install or restart the runtime under its bounded measurement harness",

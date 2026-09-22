@@ -557,8 +557,9 @@ def main() -> int:
 
     bench = Benchmark(args.output, args.samples, args.timeout)
     runtimes = [args.runtime_a, args.runtime_b]
-    net_a = f"{args.prefix}-net-a"
-    net_b = f"{args.prefix}-net-b"
+    network_prefix = args.prefix.lower()
+    net_a = f"{network_prefix}-net-a"
+    net_b = f"{network_prefix}-net-b"
     payload_bytes = args.payload_mib * 1024 * 1024
     endpoints: list[Endpoint] = []
 
