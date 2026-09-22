@@ -51,6 +51,12 @@ if "network_prefix = args.prefix.lower()" not in benchmark_network_script:
         file=sys.stderr,
     )
     raise SystemExit(1)
+if "published_tcp_host_to_guest_" not in benchmark_network_script or "endpoint.guest_ip" in benchmark_network_script:
+    print(
+        "network benchmark must measure host ingress through Apple Container published ports",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 if "--install-krun" in benchmark_script or "mise run install" in benchmark_script:
     print(
         "runtime benchmark must not install or restart the runtime under its bounded measurement harness",

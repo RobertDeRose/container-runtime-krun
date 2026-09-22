@@ -25,10 +25,10 @@ DIAL_PAYLOAD_BYTES = 64 * 1024 + 1
 class Endpoint:
     runtime: str
     container_id: str
-    guest_ip: str
     gateway: str
     tcp_port: int
     udp_port: int
+    http_port: int
 
 
 class Benchmark:
@@ -339,6 +339,7 @@ def start_endpoint(
     container_id = f"{prefix}-{key}-network-live"
     tcp_port = free_port(socket.SOCK_STREAM)
     udp_port = free_port(socket.SOCK_DGRAM)
+    http_port = free_port(socket.SOCK_STREAM)
     bench.active_containers.add(container_id)
     bench.run(
         f"{key}-network-service-start",
@@ -347,6 +348,7 @@ def start_endpoint(
             "--runtime", runtime, "--network", network,
             "--publish", f"127.0.0.1:{tcp_port}:8080/tcp",
             "--publish", f"127.0.0.1:{udp_port}:8081/udp",
+            "--publish", f"127.0.0.1:{http_port}:8082/tcp",
             image, "python3", "-u", "-c", GUEST_SERVER,
             str(payload_bytes), str(dial_port), str(DIAL_PAYLOAD_BYTES),
         ],
@@ -354,9 +356,8 @@ def start_endpoint(
     wait_ready(bench, container_id)
     attachments = inspect_attachments(bench, container_id)
     first = attachments[0]
-    guest_ip = str(ipaddress.IPv4Interface(str(first["ipv4Address"])).ip)
     gateway = str(ipaddress.IPv4Address(str(first["ipv4Gateway"])))
-    return Endpoint(runtime, container_id, guest_ip, gateway, tcp_port, udp_port)
+    return Endpoint(runtime, container_id, gateway, tcp_port, udp_port, http_port)
 
 
 def http_fetch(host: str, port: int, expected_bytes: int) -> float:
@@ -589,8 +590,8 @@ def main() -> int:
             bench,
             endpoints,
             args.iterations,
-            f"network_host_to_guest_{args.payload_mib}m",
-            lambda endpoint, _: http_fetch(endpoint.guest_ip, 8082, payload_bytes),
+            f"published_tcp_host_to_guest_{args.payload_mib}m",
+            lambda endpoint, _: http_fetch("127.0.0.1", endpoint.http_port, payload_bytes),
         )
 
         host_payload = b"h" * payload_bytes
