@@ -14,9 +14,9 @@ def config_two() -> dict:
     return {
         'networks': [
             {'ipv4Gateway': '10.250.40.1', 'ipv4Mask': '255.255.255.0',
-             'macAddress': [2, 0, 0, 0, 0, 1], 'features': 0, 'flags': 0},
+             'macAddress': [2, 0, 0, 0, 0, 1], 'features': 6531, 'flags': 0},
             {'ipv4Gateway': '10.250.41.1', 'ipv4Mask': '255.255.255.0',
-             'macAddress': [2, 0, 0, 0, 0, 2], 'features': 0, 'flags': 0},
+             'macAddress': [2, 0, 0, 0, 0, 2], 'features': 6531, 'flags': 0},
         ]
     }
 
@@ -27,10 +27,10 @@ def trace_two() -> str:
         f'helper lifecycle [event=libkrun loaded] [path={acceptance.native.LIBRARY}]',
         'helper lifecycle [event=context created] [default_firmware=disabled]',
         'helper lifecycle [event=native vmnet interface ready] [backend=libkrun-vmnet-shared] '
-        '[api=krun_add_net_vmnet_shared] [network_index=0] [features=0] [flags=0] '
+        '[api=krun_add_net_vmnet_shared] [network_index=0] [features=6531] [flags=0] '
         '[gateway=10.250.40.1] [netmask=255.255.255.0] [guest_dhcp=false] [isolated=true] [vmnet_api=vmnet_start_interface]',
         'helper lifecycle [event=native vmnet interface ready] [backend=libkrun-vmnet-shared] '
-        '[api=krun_add_net_vmnet_shared] [network_index=1] [features=0] [flags=0] '
+        '[api=krun_add_net_vmnet_shared] [network_index=1] [features=6531] [flags=0] '
         '[gateway=10.250.41.1] [netmask=255.255.255.0] [guest_dhcp=false] [isolated=true] [vmnet_api=vmnet_start_interface]',
         'helper lifecycle [event=helper privileges dropped] [pid=321] [uid=502] [euid=502] '
         '[gid=20] [egid=20] [root_regain_blocked=true]',
