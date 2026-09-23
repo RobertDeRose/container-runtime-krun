@@ -60,7 +60,7 @@ import Testing
 
       let transferStart = clock.now
       try handle.write(contentsOf: payload)
-      let received = handle.readDataToEndOfFile()
+      let received = try readExactly(handle: handle, count: payload.count)
       let transferDuration = transferStart.duration(to: clock.now)
       try handle.close()
       #expect(received == payload)
@@ -81,6 +81,17 @@ import Testing
       )
     }
   }
+}
+
+private func readExactly(handle: FileHandle, count: Int) throws -> Data {
+  var data = Data()
+  while data.count < count {
+    guard let chunk = try handle.read(upToCount: count - data.count), !chunk.isEmpty else {
+      break
+    }
+    data.append(chunk)
+  }
+  return data
 }
 
 private func exchange(
