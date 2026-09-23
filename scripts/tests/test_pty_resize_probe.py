@@ -226,7 +226,7 @@ class PTYCompatibilityTests(unittest.TestCase):
                 command,
                 ready_timeout=1.0,
                 setup_timeout=setup_timeout,
-                setup_interval=0.1,
+                setup_interval=0.5,
                 resize_timeout=resize_timeout,
                 exit_timeout=0.1,
                 term_timeout=0.1,
