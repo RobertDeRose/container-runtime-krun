@@ -96,18 +96,14 @@ def native_trace_many(text: str, config: dict[str, Any], uid: int, gid: int) -> 
     require(pid > 1 and start.get('pid') == str(pid), 'helper PID changed or is invalid')
 
     for index, interface in enumerate(networks):
-        require(
-            'socketPath' not in interface
-            and interface.get('features') == native.VMNET_OFFLOAD_FEATURES
-            and interface.get('flags') == 0,
-            f'network {index} does not use the required native vmnet offload configuration',
-        )
+        require('socketPath' not in interface and interface.get('features') == 0 and interface.get('flags') == 0,
+                f'network {index} uses legacy socket/offload/DHCP configuration')
         event = by_index[index]
         expected = {
             'api': 'krun_add_net_vmnet_shared',
             'backend': 'libkrun-vmnet-shared',
             'network_index': str(index),
-            'features': str(native.VMNET_OFFLOAD_FEATURES),
+            'features': '0',
             'flags': '0',
             'vmnet_api': 'vmnet_start_interface',
             'guest_dhcp': 'false',

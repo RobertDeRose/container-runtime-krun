@@ -71,11 +71,9 @@ import Testing
 }
 
 @Test func nativeVMNetAcceptsBoundedStaticConfiguration() throws {
-  #expect(KrunNetworkFeatures.nativeVMNetOffload == 6531)
   let network = KrunNetworkConfig(
     ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0",
-    macAddress: [2, 0, 0, 0, 0, 1],
-    features: KrunNetworkFeatures.nativeVMNetOffload
+    macAddress: [2, 0, 0, 0, 0, 1]
   )
   try network.validateNativeVMNet()
   let data = try JSONEncoder().encode(network)
@@ -83,17 +81,14 @@ import Testing
   #expect(json["socketPath"] == nil)
 }
 
-@Test func nativeVMNetRejectsInvalidMACAndPartialOffloads() {
+@Test func nativeVMNetRejectsInvalidMACAndOffloads() {
   for mac: [UInt8] in [[], [2, 0], [0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 1]] {
     let network = KrunNetworkConfig(
       ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0", macAddress: mac
     )
     #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
   }
-  for (features, flags): (UInt32, UInt32) in [
-    (1, 0), (KrunNetworkFeatures.nativeVMNetOffload ^ (1 << 12), 0),
-    (KrunNetworkFeatures.nativeVMNetOffload, 1),
-  ] {
+  for (features, flags): (UInt32, UInt32) in [(1, 0), (0, 1)] {
     let network = KrunNetworkConfig(
       ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0",
       macAddress: [2, 0, 0, 0, 0, 1], features: features, flags: flags
