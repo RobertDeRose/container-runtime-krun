@@ -36,13 +36,19 @@ if runtime_dial_task.get("run") != "scripts/validate_runtime_dial.sh --install":
     )
     raise SystemExit(1)
 
-benchmark_task = mise["tasks"]["benchmark:runtimes"]
-if benchmark_task.get("run") != "scripts/benchmark_runtimes.sh":
-    print(
-        "mise task benchmark:runtimes must measure the installed runtimes without performing a privileged install",
-        file=sys.stderr,
-    )
+benchmark_task = ROOT / ".mise/tasks/benchmark/runtimes"
+if not benchmark_task.is_file():
+    print("benchmark:runtimes must be a mise file task", file=sys.stderr)
     raise SystemExit(1)
+benchmark_task_text = benchmark_task.read_text()
+for required in (
+    '#USAGE flag "--iterations <iterations>"',
+    'default="5"',
+    'exec "$MISE_PROJECT_ROOT/scripts/benchmark_runtimes.sh"',
+):
+    if required not in benchmark_task_text:
+        print(f"benchmark:runtimes mise usage contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
 benchmark_script = (ROOT / "scripts/benchmark_runtimes.sh").read_text()
 benchmark_network_script = (ROOT / "scripts/benchmark_network_metrics.py").read_text()
 if "network_prefix = args.prefix.lower()" not in benchmark_network_script:
@@ -62,6 +68,9 @@ if "--install-krun" in benchmark_script or "mise run install" in benchmark_scrip
         "runtime benchmark must not install or restart the runtime under its bounded measurement harness",
         file=sys.stderr,
     )
+    raise SystemExit(1)
+if 'bench.log("RUN paired-dial-probe")' not in benchmark_network_script:
+    print("RuntimeClient.dial benchmark must use the paired A/B B/A probe", file=sys.stderr)
     raise SystemExit(1)
 
 routes = {

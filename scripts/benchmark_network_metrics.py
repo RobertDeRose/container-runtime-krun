@@ -491,35 +491,39 @@ def sample_metric(
             bench.append(endpoint.runtime, metric, iteration, duration_ms, status)
 
 
-def run_dial_probe(bench: Benchmark, endpoint: Endpoint, iterations: int, dial_port: int) -> None:
-    key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+def run_dial_probe(bench: Benchmark, endpoints: list[Endpoint], iterations: int, dial_port: int) -> None:
+    if len(endpoints) != 2:
+        raise ValueError("RuntimeClient.dial benchmark requires exactly two runtime endpoints")
+    endpoint_a, endpoint_b = endpoints
     environment = dict(**__import__("os").environ)
     environment.update(
         {
-            "KRUN_RUNTIME_DIAL_BENCHMARK_CONTAINER_ID": endpoint.container_id,
-            "KRUN_RUNTIME_DIAL_BENCHMARK_RUNTIME": endpoint.runtime,
+            "KRUN_RUNTIME_DIAL_BENCHMARK_CONTAINER_ID_A": endpoint_a.container_id,
+            "KRUN_RUNTIME_DIAL_BENCHMARK_RUNTIME_A": endpoint_a.runtime,
+            "KRUN_RUNTIME_DIAL_BENCHMARK_CONTAINER_ID_B": endpoint_b.container_id,
+            "KRUN_RUNTIME_DIAL_BENCHMARK_RUNTIME_B": endpoint_b.runtime,
             "KRUN_RUNTIME_DIAL_BENCHMARK_PORT": str(dial_port),
             "KRUN_RUNTIME_DIAL_BENCHMARK_ITERATIONS": str(iterations),
             "KRUN_RUNTIME_DIAL_BENCHMARK_SAMPLES": str(bench.samples.resolve()),
         }
     )
-    bench.log(f"RUN {key}-dial-probe")
+    bench.log("RUN paired-dial-probe")
     result = subprocess.run(
         ["swift", "test", "--force-resolved-versions", "--filter", "runtimeDialBenchmarkProbe"],
         capture_output=True,
         text=True,
-        timeout=max(bench.timeout, iterations * 30),
+        timeout=max(bench.timeout, iterations * 60),
         check=False,
         env=environment,
     )
-    (bench.output / f"{key}-dial-probe.txt").write_text(
+    (bench.output / "paired-dial-probe.txt").write_text(
         f"$ swift test --force-resolved-versions --filter runtimeDialBenchmarkProbe\n"
         f"{result.stdout}{result.stderr}\nexit_status={result.returncode}\n",
         encoding="utf-8",
     )
     if result.returncode != 0:
         bench.failed = True
-        bench.log(f"{endpoint.runtime}: RuntimeClient.dial benchmark probe failed")
+        bench.log("paired RuntimeClient.dial benchmark probe failed")
 
 
 def wait_port_bindable(sock_type: int, port: int, timeout: float = 5.0) -> bool:
@@ -629,8 +633,7 @@ def main() -> int:
             lambda endpoint, _: published_udp(endpoint),
         )
 
-        for endpoint in endpoints:
-            run_dial_probe(bench, endpoint, args.iterations, args.dial_port)
+        run_dial_probe(bench, endpoints, args.iterations, args.dial_port)
 
         for endpoint in endpoints:
             key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)

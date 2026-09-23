@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#MISE description="Benchmark the installed Apple/VZ and krun runtimes, networking, and vsock dial behavior"
+#USAGE flag "--runtime-a <runtime>" help="Baseline runtime" default="container-runtime-linux"
+#USAGE flag "--runtime-b <runtime>" help="Comparison runtime" default="container-runtime-krun"
+#USAGE flag "--image <image>" help="Warm test image" default="alpine:3.20"
+#USAGE flag "--network <network>" help="Network used for network samples" default="default"
+#USAGE flag "--network-image <image>" help="Python image used for network and dial samples" default="python:3.13-alpine"
+#USAGE flag "--network-payload <mib>" help="MiB transferred in each network throughput sample" default="16"
+#USAGE flag "--multinic-subnet-a <cidr>" help="First temporary multi-NIC subnet" default="10.250.50.0/24"
+#USAGE flag "--multinic-subnet-b <cidr>" help="Second temporary multi-NIC subnet" default="10.250.51.0/24"
+#USAGE flag "--iterations <iterations>" help="Samples per repeated metric" default="5"
+#USAGE flag "--startup-memory <memory>" help="Override memory only for startup samples"
+#USAGE flag "--startup-cpus <cpus>" help="Override CPU count only for startup samples"
+#USAGE flag "--startup-only" help="Collect only paired startup samples"
+#USAGE flag "--startup-cap-add <capability>" var=#true help="Add Linux capability to startup containers; repeatable"
+#USAGE flag "--command-timeout <seconds>" help="Liveness deadline per benchmark command" default="180"
+#USAGE flag "--result-root <dir>" help="Output directory" default="validation-results"
+
+set -euo pipefail
+
+args=(
+  --runtime-a "${usage_runtime_a?}"
+  --runtime-b "${usage_runtime_b?}"
+  --image "${usage_image?}"
+  --network "${usage_network?}"
+  --network-image "${usage_network_image?}"
+  --network-payload "${usage_network_payload?}"
+  --multinic-subnet-a "${usage_multinic_subnet_a?}"
+  --multinic-subnet-b "${usage_multinic_subnet_b?}"
+  --iterations "${usage_iterations?}"
+  --command-timeout "${usage_command_timeout?}"
+  --result-root "${usage_result_root?}"
+)
+
+if [[ -n "${usage_startup_memory:-}" ]]; then
+  args+=(--startup-memory "$usage_startup_memory")
+fi
+if [[ -n "${usage_startup_cpus:-}" ]]; then
+  args+=(--startup-cpus "$usage_startup_cpus")
+fi
+if [[ "${usage_startup_only:-false}" == "true" ]]; then
+  args+=(--startup-only)
+fi
+if [[ -n "${usage_startup_cap_add:-}" ]]; then
+  eval "startup_caps=(${usage_startup_cap_add})"
+  for capability in "${startup_caps[@]}"; do
+    args+=(--startup-cap-add "$capability")
+  done
+fi
+
+exec "$MISE_PROJECT_ROOT/scripts/benchmark_runtimes.sh" "${args[@]}"

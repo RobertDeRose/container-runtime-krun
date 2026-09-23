@@ -31,47 +31,55 @@ import Testing
 @Test func runtimeDialBenchmarkProbe() async throws {
   let environment = ProcessInfo.processInfo.environment
   guard
-    let id = environment["KRUN_RUNTIME_DIAL_BENCHMARK_CONTAINER_ID"],
+    let idA = environment["KRUN_RUNTIME_DIAL_BENCHMARK_CONTAINER_ID_A"],
+    let runtimeA = environment["KRUN_RUNTIME_DIAL_BENCHMARK_RUNTIME_A"],
+    let idB = environment["KRUN_RUNTIME_DIAL_BENCHMARK_CONTAINER_ID_B"],
+    let runtimeB = environment["KRUN_RUNTIME_DIAL_BENCHMARK_RUNTIME_B"],
     let samplesPath = environment["KRUN_RUNTIME_DIAL_BENCHMARK_SAMPLES"]
   else {
     return
   }
-  let runtime = environment["KRUN_RUNTIME_DIAL_BENCHMARK_RUNTIME"] ?? "container-runtime-krun"
   let port = try #require(UInt32(environment["KRUN_RUNTIME_DIAL_BENCHMARK_PORT"] ?? ""))
   let iterations = try #require(Int(environment["KRUN_RUNTIME_DIAL_BENCHMARK_ITERATIONS"] ?? ""))
   #expect(iterations > 0)
 
-  let client = try await RuntimeClient.create(id: id, runtime: runtime)
+  let endpoints = [
+    (runtimeA, try await RuntimeClient.create(id: idA, runtime: runtimeA)),
+    (runtimeB, try await RuntimeClient.create(id: idB, runtime: runtimeB)),
+  ]
   var payload = Data(repeating: 0x78, count: 64 * 1024)
   payload.append(0x0a)
   let clock = ContinuousClock()
 
   for iteration in 1...iterations {
-    let dialStart = clock.now
-    let handle = try await client.dial(port)
-    let dialDuration = dialStart.duration(to: clock.now)
+    let order = iteration.isMultiple(of: 2) ? Array(endpoints.reversed()) : endpoints
+    for (runtime, client) in order {
+      let dialStart = clock.now
+      let handle = try await client.dial(port)
+      let dialDuration = dialStart.duration(to: clock.now)
 
-    let transferStart = clock.now
-    try handle.write(contentsOf: payload)
-    let received = handle.readDataToEndOfFile()
-    let transferDuration = transferStart.duration(to: clock.now)
-    try handle.close()
-    #expect(received == payload)
+      let transferStart = clock.now
+      try handle.write(contentsOf: payload)
+      let received = handle.readDataToEndOfFile()
+      let transferDuration = transferStart.duration(to: clock.now)
+      try handle.close()
+      #expect(received == payload)
 
-    try appendBenchmarkSample(
-      path: samplesPath,
-      runtime: runtime,
-      metric: "vsock_dial_connect",
-      iteration: iteration,
-      duration: dialDuration
-    )
-    try appendBenchmarkSample(
-      path: samplesPath,
-      runtime: runtime,
-      metric: "vsock_dial_roundtrip_64k",
-      iteration: iteration,
-      duration: transferDuration
-    )
+      try appendBenchmarkSample(
+        path: samplesPath,
+        runtime: runtime,
+        metric: "vsock_dial_connect",
+        iteration: iteration,
+        duration: dialDuration
+      )
+      try appendBenchmarkSample(
+        path: samplesPath,
+        runtime: runtime,
+        metric: "vsock_dial_roundtrip_64k",
+        iteration: iteration,
+        duration: transferDuration
+      )
+    }
   }
 }
 
