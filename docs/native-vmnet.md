@@ -11,13 +11,16 @@ unchanged. The runtime passes the assigned subnet and MAC to
 `krun_add_net_vmnet_shared`, not `krun_add_net_unixgram`.
 
 libkrun starts an isolated shared-mode vmnet interface in each VMM process and
-requires zero offload features. Matching interfaces use the same Apple-owned
-allocationOnly subnet without taking an exclusive `vmnet_network_ref` reservation,
+enables vmnet checksum/TCP-segmentation offload with virtio headers. The runtime
+requests the matching complete virtio-net feature set; partial offload combinations
+are rejected. Matching interfaces use the same Apple-owned allocationOnly subnet
+without taking an exclusive `vmnet_network_ref` reservation,
 so concurrent VMM processes can coexist on that subnet. The guest remains
 statically configured from Apple's attachment and does not run a DHCP client; the
 shared-mode vmnet DHCP service is not used by the runtime. libkrun's internal
-anonymous socket pair carries raw Ethernet to the existing virtio-net implementation;
-there is no external packet helper, named packet socket, or silent fallback. Native
+anonymous socket pair carries vmnet packet data, including virtio headers when
+offload is enabled, to the existing virtio-net implementation; there is no external
+packet helper, named packet socket, or silent fallback. Native
 setup failure is a startup failure.
 
 ## Privilege boundary

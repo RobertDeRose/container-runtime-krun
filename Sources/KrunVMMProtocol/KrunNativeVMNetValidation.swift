@@ -6,15 +6,18 @@ public struct KrunNativeVMNetError: Error, CustomStringConvertible {
 
 extension KrunNetworkConfig {
   /// Check the bounded ABI inputs before privileged libkrun setup. libkrun also
-  /// validates the IPv4 subnet and rejects nonzero offload/DHCP options.
+  /// validates the IPv4 subnet and accepts only the complete native-vmnet
+  /// offload feature set, never a partial feature combination.
   public func validateNativeVMNet() throws {
     guard macAddress.count == 6, macAddress != [UInt8](repeating: 0, count: 6),
       macAddress[0] & 1 == 0
     else {
       throw KrunNativeVMNetError(description: "native vmnet requires a six-byte unicast MAC")
     }
-    guard features == 0, flags == 0 else {
-      throw KrunNativeVMNetError(description: "native vmnet requires features=0 and flags=0")
+    guard (features == 0 || features == KrunNetworkFeatures.nativeVMNetOffload), flags == 0 else {
+      throw KrunNativeVMNetError(
+        description: "native vmnet requires features=0 or the complete offload set and flags=0"
+      )
     }
     for value in [ipv4Gateway, ipv4Mask] {
       guard (7...15).contains(value.utf8.count),

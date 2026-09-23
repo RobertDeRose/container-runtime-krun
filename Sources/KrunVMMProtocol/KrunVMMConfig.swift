@@ -67,6 +67,13 @@ public struct KrunVsockMapping: Codable, Sendable, Equatable {
   }
 }
 
+public enum KrunNetworkFeatures {
+  // vmnet checksum + TCP segmentation offload with virtio headers. This must
+  // match libkrun's VMNET_OFFLOAD_FEATURES mask.
+  public static let nativeVMNetOffload: UInt32 =
+    (1 << 0) | (1 << 1) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12)
+}
+
 public struct KrunNetworkConfig: Codable, Sendable, Equatable {
   public let ipv4Gateway: String
   public let ipv4Mask: String

@@ -86,8 +86,10 @@ Explicit network names are not rewritten. Before allocation, the runtime inspect
 For `allocationOnly`, the runtime passes the Apple-allocated subnet/MAC to
 `krun_add_net_vmnet_shared`. The protected VMM helper creates the network and
 interface through native libkrun, then permanently drops to the caller's UID/GID
-before opening guest resources. DHCP and offload features are disabled. There is
-no external helper or named packet socket. Apple still owns allocation and the
+before opening guest resources. Guest DHCP remains disabled. Native vmnet enables
+checksum and TCP-segmentation offload together with virtio headers, and the runtime
+requests the matching complete virtio-net feature set. There is no external helper
+or named packet socket. Apple still owns allocation and the
 persistent attachment session. See [native vmnet](native-vmnet.md) for installation,
 security boundaries, timeout behavior, and the currently limited acceptance scope.
 
