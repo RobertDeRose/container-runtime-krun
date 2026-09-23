@@ -49,6 +49,20 @@ for required in (
     if required not in benchmark_task_text:
         print(f"benchmark:runtimes mise usage contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
+vmnet_batch_task = ROOT / ".mise/tasks/validate/vmnet-batching"
+if not vmnet_batch_task.is_file():
+    print("validate:vmnet-batching must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+vmnet_batch_task_text = vmnet_batch_task.read_text()
+for required in (
+    '#USAGE flag "--iterations <iterations>"',
+    '#USAGE flag "--payload-mib <mib>"',
+    'exec /usr/bin/caffeinate -i "$MISE_PROJECT_ROOT/scripts/validate_vmnet_batching.sh"',
+):
+    if required not in vmnet_batch_task_text:
+        print(f"validate:vmnet-batching mise usage contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 benchmark_script = (ROOT / "scripts/benchmark_runtimes.sh").read_text()
 benchmark_network_script = (ROOT / "scripts/benchmark_network_metrics.py").read_text()
 if "network_prefix = args.prefix.lower()" not in benchmark_network_script:

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#MISE description="Validate libkrun vmnet packet batching and collect paired bulk-network evidence"
+#USAGE flag "--iterations <iterations>" help="Samples per repeated network metric" default="10"
+#USAGE flag "--payload-mib <mib>" help="MiB transferred by each bulk sample" default="16"
+#USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
+#USAGE flag "--runtime-a <runtime>" help="Baseline runtime" default="container-runtime-linux"
+#USAGE flag "--runtime-b <runtime>" help="Comparison runtime" default="container-runtime-krun"
+#USAGE flag "--image <image>" help="Lifecycle image" default="alpine:3.20"
+#USAGE flag "--network-image <image>" help="Network service image" default="python:3.13-alpine"
+#USAGE flag "--network <network>" help="Network for service endpoints" default="default"
+#USAGE flag "--subnet-a <cidr>" help="First temporary multi-NIC subnet" default="10.250.60.0/24"
+#USAGE flag "--subnet-b <cidr>" help="Second temporary multi-NIC subnet" default="10.250.61.0/24"
+#USAGE flag "--timeout <seconds>" help="Command timeout seconds" default="180"
+
+set -euo pipefail
+
+exec /usr/bin/caffeinate -i "$MISE_PROJECT_ROOT/scripts/validate_vmnet_batching.sh" \
+  --install \
+  --iterations "${usage_iterations?}" \
+  --payload-mib "${usage_payload_mib?}" \
+  --result-root "${usage_result_root?}" \
+  --runtime-a "${usage_runtime_a?}" \
+  --runtime-b "${usage_runtime_b?}" \
+  --image "${usage_image?}" \
+  --network-image "${usage_network_image?}" \
+  --network "${usage_network?}" \
+  --subnet-a "${usage_subnet_a?}" \
+  --subnet-b "${usage_subnet_b?}" \
+  --timeout "${usage_timeout?}"
