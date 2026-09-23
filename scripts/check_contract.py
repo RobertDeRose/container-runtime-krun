@@ -44,7 +44,7 @@ benchmark_task_text = benchmark_task.read_text()
 for required in (
     '#USAGE flag "--iterations <iterations>"',
     'default="5"',
-    'exec "$MISE_PROJECT_ROOT/scripts/benchmark_runtimes.sh"',
+    'exec /usr/bin/caffeinate -i "$MISE_PROJECT_ROOT/scripts/benchmark_runtimes.sh"',
 ):
     if required not in benchmark_task_text:
         print(f"benchmark:runtimes mise usage contract is missing {required}", file=sys.stderr)
@@ -71,6 +71,13 @@ if "--install-krun" in benchmark_script or "mise run install" in benchmark_scrip
     raise SystemExit(1)
 if 'bench.log("RUN paired-dial-probe")' not in benchmark_network_script:
     print("RuntimeClient.dial benchmark must use the paired A/B B/A probe", file=sys.stderr)
+    raise SystemExit(1)
+benchmark_dial_test = (ROOT / "Tests/KrunRuntimeCoreTests/KrunRuntimeDialBehavioralTests.swift").read_text()
+if "readExactly(handle: handle, count: payload.count)" not in benchmark_dial_test:
+    print(
+        "RuntimeClient.dial benchmark must time the echoed payload, not peer EOF/connection teardown",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
 
 routes = {

@@ -48,4 +48,4 @@ if [[ -n "${usage_startup_cap_add:-}" ]]; then
   done
 fi
 
-exec "$MISE_PROJECT_ROOT/scripts/benchmark_runtimes.sh" "${args[@]}"
+exec /usr/bin/caffeinate -i "$MISE_PROJECT_ROOT/scripts/benchmark_runtimes.sh" "${args[@]}"
