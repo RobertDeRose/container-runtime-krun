@@ -8,6 +8,7 @@ import contextlib
 import http.server
 import ipaddress
 import json
+import shutil
 import socket
 import subprocess
 import sys
@@ -115,6 +116,40 @@ class Benchmark:
 
 def elapsed_ms(start_ns: int) -> float:
     return (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+
+def application_root(bench: Benchmark) -> Path | None:
+    result = bench.run(
+        "system-status-network-benchmark",
+        ["container", "system", "status", "--format", "json"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    value = payload.get("appRoot") or payload.get("paths", {}).get("appRoot")
+    return Path(value) if isinstance(value, str) and value else None
+
+
+def capture_krun_vmnet_profile(bench: Benchmark, app_root: Path | None, endpoint: Endpoint) -> None:
+    if app_root is None or "krun" not in endpoint.runtime:
+        return
+    source = app_root / "containers" / endpoint.container_id / "krun-vmm.log"
+    key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+    if not source.is_file():
+        bench.log(f"{endpoint.runtime}: krun-vmm.log unavailable for vmnet TX profile")
+        return
+    destination = bench.output / f"{key}-network-service-krun-vmm.log"
+    shutil.copyfile(source, destination)
+    profile = [line for line in destination.read_text(encoding="utf-8", errors="replace").splitlines()
+               if "libkrun: vmnet tx profile" in line]
+    (bench.output / f"{key}-vmnet-tx-profile.txt").write_text(
+        "\n".join(profile) + ("\n" if profile else ""),
+        encoding="utf-8",
+    )
 
 
 def free_port(sock_type: int) -> int:
@@ -590,6 +625,7 @@ def main() -> int:
         parser.error("iterations and payload-mib must be positive")
 
     bench = Benchmark(args.output, args.samples, args.timeout)
+    app_root = application_root(bench)
     runtimes = [args.runtime_a, args.runtime_b]
     network_prefix = args.prefix.lower()
     net_a = f"{network_prefix}-net-a"
@@ -666,6 +702,7 @@ def main() -> int:
         for endpoint in endpoints:
             key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
             bench.run(f"{key}-network-service-stop", ["container", "stop", endpoint.container_id])
+            capture_krun_vmnet_profile(bench, app_root, endpoint)
             bench.run(f"{key}-network-service-delete", ["container", "delete", endpoint.container_id])
             bench.active_containers.discard(endpoint.container_id)
             if not wait_port_bindable(socket.SOCK_STREAM, endpoint.tcp_port):
