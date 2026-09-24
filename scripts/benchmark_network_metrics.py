@@ -144,10 +144,15 @@ def capture_krun_vmnet_profile(bench: Benchmark, app_root: Path | None, endpoint
         return
     destination = bench.output / f"{key}-network-service-krun-vmm.log"
     shutil.copyfile(source, destination)
-    profile = [line for line in destination.read_text(encoding="utf-8", errors="replace").splitlines()
-               if "libkrun: vmnet tx profile" in line]
+    lines = destination.read_text(encoding="utf-8", errors="replace").splitlines()
+    vmnet_profile = [line for line in lines if "libkrun: vmnet tx profile" in line]
     (bench.output / f"{key}-vmnet-tx-profile.txt").write_text(
-        "\n".join(profile) + ("\n" if profile else ""),
+        "\n".join(vmnet_profile) + ("\n" if vmnet_profile else ""),
+        encoding="utf-8",
+    )
+    virtio_profile = [line for line in lines if "libkrun: virtio-net tx profile" in line]
+    (bench.output / f"{key}-virtio-net-tx-profile.txt").write_text(
+        "\n".join(virtio_profile) + ("\n" if virtio_profile else ""),
         encoding="utf-8",
     )
 
