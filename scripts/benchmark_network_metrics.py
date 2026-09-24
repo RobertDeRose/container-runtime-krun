@@ -263,17 +263,24 @@ import time
 payload_bytes = int(sys.argv[1])
 vsock_port = int(sys.argv[2])
 vsock_payload_bytes = int(sys.argv[3])
-payload = b"n" * payload_bytes
-
 class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path != "/payload":
+    def do_POST(self):
+        if self.path != "/upload":
             self.send_error(404)
             return
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(payload)))
+        length = int(self.headers.get("Content-Length", "0"))
+        if length != payload_bytes:
+            self.send_error(400)
+            return
+        remaining = length
+        while remaining:
+            chunk = self.rfile.read(min(1024 * 1024, remaining))
+            if not chunk:
+                self.send_error(400)
+                return
+            remaining -= len(chunk)
+        self.send_response(204)
         self.end_headers()
-        self.wfile.write(payload)
     def log_message(self, fmt, *args):
         pass
 
@@ -360,32 +367,48 @@ def start_endpoint(
     return Endpoint(runtime, container_id, gateway, tcp_port, udp_port, http_port)
 
 
-def http_fetch(host: str, port: int, expected_bytes: int) -> float:
-    import urllib.request
+def http_upload(host: str, port: int, payload: bytes) -> float:
+    import http.client
 
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    connection = http.client.HTTPConnection(host, port, timeout=30)
     start = time.perf_counter_ns()
-    total = 0
-    with opener.open(f"http://{host}:{port}/payload", timeout=30) as response:
-        while chunk := response.read(1024 * 1024):
-            total += len(chunk)
-    duration = elapsed_ms(start)
-    if total != expected_bytes:
-        raise RuntimeError(f"expected {expected_bytes} HTTP bytes, got {total}")
+    try:
+        connection.request(
+            "POST",
+            "/upload",
+            body=payload,
+            headers={"Content-Length": str(len(payload))},
+        )
+        response = connection.getresponse()
+        response.read()
+        duration = elapsed_ms(start)
+    finally:
+        connection.close()
+    if response.status != 204:
+        raise RuntimeError(f"expected HTTP 204, got {response.status}")
     return duration
 
 
 @contextlib.contextmanager
-def host_payload_server(address: str, payload: bytes) -> Iterator[int]:
+def host_sink_server(address: str, expected_bytes: int) -> Iterator[int]:
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.path != "/payload":
+        def do_POST(self) -> None:
+            if self.path != "/upload":
                 self.send_error(404)
                 return
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(payload)))
+            length = int(self.headers.get("Content-Length", "0"))
+            if length != expected_bytes:
+                self.send_error(400)
+                return
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    self.send_error(400)
+                    return
+                remaining -= len(chunk)
+            self.send_response(204)
             self.end_headers()
-            self.wfile.write(payload)
 
         def log_message(self, fmt: str, *args: object) -> None:
             pass
@@ -402,24 +425,30 @@ def host_payload_server(address: str, payload: bytes) -> Iterator[int]:
         thread.join(timeout=2)
 
 
-def guest_http_fetch(bench: Benchmark, endpoint: Endpoint, host_port: int, expected_bytes: int, label: str) -> float:
+def guest_http_upload(bench: Benchmark, endpoint: Endpoint, host_port: int, payload_bytes: int, label: str) -> float:
     script = r'''
+import http.client
 import sys
 import time
-import urllib.request
-url = sys.argv[1]
-expected = int(sys.argv[2])
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+host = sys.argv[1]
+port = int(sys.argv[2])
+payload_bytes = int(sys.argv[3])
+payload = b"g" * payload_bytes
+connection = http.client.HTTPConnection(host, port, timeout=30)
 start = time.perf_counter_ns()
-total = 0
-with opener.open(url, timeout=30) as response:
-    while True:
-        chunk = response.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-if total != expected:
-    raise SystemExit(f"expected {expected} bytes, got {total}")
+try:
+    connection.request(
+        "POST",
+        "/upload",
+        body=payload,
+        headers={"Content-Length": str(payload_bytes)},
+    )
+    response = connection.getresponse()
+    response.read()
+finally:
+    connection.close()
+if response.status != 204:
+    raise SystemExit(f"expected HTTP 204, got {response.status}")
 print(f"{(time.perf_counter_ns() - start) / 1_000_000:.6f}")
 '''
     result = bench.run(
@@ -427,7 +456,7 @@ print(f"{(time.perf_counter_ns() - start) / 1_000_000:.6f}")
         [
             "container", "exec", endpoint.container_id,
             "python3", "-c", script,
-            f"http://{endpoint.gateway}:{host_port}/payload", str(expected_bytes),
+            endpoint.gateway, str(host_port), str(payload_bytes),
         ],
     )
     return float(result.stdout.strip().splitlines()[-1])
@@ -590,20 +619,19 @@ def main() -> int:
             )
             endpoints.append(endpoint)
 
+        host_payload = b"h" * payload_bytes
         sample_metric(
             bench,
             endpoints,
             args.iterations,
             f"published_tcp_host_to_guest_{args.payload_mib}m",
-            lambda endpoint, _: http_fetch("127.0.0.1", endpoint.http_port, payload_bytes),
+            lambda endpoint, _: http_upload("127.0.0.1", endpoint.http_port, host_payload),
         )
 
-        host_payload = b"h" * payload_bytes
-
         def guest_to_host(endpoint: Endpoint, iteration: int) -> float:
-            with host_payload_server(endpoint.gateway, host_payload) as host_port:
+            with host_sink_server(endpoint.gateway, payload_bytes) as host_port:
                 key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
-                return guest_http_fetch(
+                return guest_http_upload(
                     bench,
                     endpoint,
                     host_port,

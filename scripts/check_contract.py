@@ -71,9 +71,22 @@ if "network_prefix = args.prefix.lower()" not in benchmark_network_script:
         file=sys.stderr,
     )
     raise SystemExit(1)
-if "published_tcp_host_to_guest_" not in benchmark_network_script or "endpoint.guest_ip" in benchmark_network_script:
+if (
+    "published_tcp_host_to_guest_" not in benchmark_network_script
+    or "endpoint.guest_ip" in benchmark_network_script
+    or 'lambda endpoint, _: http_upload("127.0.0.1"' not in benchmark_network_script
+):
     print(
-        "network benchmark must measure host ingress through Apple Container published ports",
+        "network benchmark must send host-to-guest bulk payload through Apple Container published ports",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if (
+    "with host_sink_server(endpoint.gateway, payload_bytes)" not in benchmark_network_script
+    or "guest_http_upload(" not in benchmark_network_script
+):
+    print(
+        "network benchmark must send guest-to-host bulk payload to the host gateway",
         file=sys.stderr,
     )
     raise SystemExit(1)
