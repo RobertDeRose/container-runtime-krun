@@ -157,6 +157,80 @@ def capture_krun_vmnet_profile(bench: Benchmark, app_root: Path | None, endpoint
     )
 
 
+GUEST_NET_FEATURE_PROBE = r"""
+import ctypes
+import glob
+import json
+import os
+import socket
+
+SIOCETHTOOL = 0x8946
+FEATURE_COMMANDS = {
+    "rx_checksum": 0x00000014,
+    "tx_checksum": 0x00000016,
+    "scatter_gather": 0x00000018,
+    "tso": 0x0000001E,
+    "gso": 0x00000023,
+    "gro": 0x0000002B,
+}
+
+
+class EthtoolValue(ctypes.Structure):
+    _fields_ = [("cmd", ctypes.c_uint32), ("data", ctypes.c_uint32)]
+
+
+class IfreqUnion(ctypes.Union):
+    _fields_ = [("data", ctypes.c_void_p), ("padding", ctypes.c_ubyte * 24)]
+
+
+class Ifreq(ctypes.Structure):
+    _fields_ = [("name", ctypes.c_char * 16), ("ifr_ifru", IfreqUnion)]
+
+
+interfaces = sorted(
+    os.path.basename(path)
+    for path in glob.glob("/sys/class/net/*")
+    if os.path.basename(path) != "lo"
+)
+if not interfaces:
+    raise SystemExit("no non-loopback network interface found")
+interface = interfaces[0]
+libc = ctypes.CDLL(None, use_errno=True)
+features = {}
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    for name, command in FEATURE_COMMANDS.items():
+        value = EthtoolValue(command, 0)
+        ifreq = Ifreq()
+        ifreq.name = interface.encode()
+        ifreq.ifr_ifru.data = ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
+        if libc.ioctl(sock.fileno(), SIOCETHTOOL, ctypes.byref(ifreq)) != 0:
+            features[name] = None
+        else:
+            features[name] = bool(value.data)
+
+queues = {
+    "rx": len(glob.glob(f"/sys/class/net/{interface}/queues/rx-*")),
+    "tx": len(glob.glob(f"/sys/class/net/{interface}/queues/tx-*")),
+}
+print(json.dumps({"interface": interface, "features": features, "queues": queues}, sort_keys=True))
+"""
+
+
+def capture_guest_network_features(bench: Benchmark, endpoint: Endpoint) -> None:
+    key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+    result = bench.run(
+        f"{key}-guest-network-features",
+        ["container", "exec", endpoint.container_id, "python3", "-c", GUEST_NET_FEATURE_PROBE],
+    )
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{endpoint.runtime}: invalid guest network feature profile") from error
+    payload["runtime"] = endpoint.runtime
+    with (bench.output / "guest-network-features.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
 def free_port(sock_type: int) -> int:
     with socket.socket(socket.AF_INET, sock_type) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -468,8 +542,12 @@ def host_sink_server(address: str, expected_bytes: int) -> Iterator[int]:
 def guest_http_upload(bench: Benchmark, endpoint: Endpoint, host_port: int, payload_bytes: int, label: str) -> float:
     script = r'''
 import http.client
+import json
+import socket
+import struct
 import sys
 import time
+
 host = sys.argv[1]
 port = int(sys.argv[2])
 payload_bytes = int(sys.argv[3])
@@ -483,13 +561,42 @@ try:
         body=payload,
         headers={"Content-Length": str(payload_bytes)},
     )
+    send_done = time.perf_counter_ns()
+    sock = connection.sock
+    tcp_info = {}
+    if sock is not None and hasattr(socket, "TCP_INFO"):
+        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+        if len(info) >= 104:
+            fields = struct.unpack_from("=24x5I16x8I", info)
+            tcp_info = {
+                "unacked": fields[0],
+                "sacked": fields[1],
+                "lost": fields[2],
+                "retrans": fields[3],
+                "fackets": fields[4],
+                "pmtu": fields[5],
+                "rcv_ssthresh": fields[6],
+                "rtt_us": fields[7],
+                "rttvar_us": fields[8],
+                "snd_ssthresh": fields[9],
+                "snd_cwnd": fields[10],
+                "advmss": fields[11],
+                "reordering": fields[12],
+            }
+            tcp_info["total_retrans"] = struct.unpack_from("=I", info, 100)[0]
     response = connection.getresponse()
     response.read()
+    total_done = time.perf_counter_ns()
 finally:
     connection.close()
 if response.status != 204:
     raise SystemExit(f"expected HTTP 204, got {response.status}")
-print(f"{(time.perf_counter_ns() - start) / 1_000_000:.6f}")
+print("tcp_info=" + json.dumps({
+    "send_ms": (send_done - start) / 1_000_000,
+    "total_ms": (total_done - start) / 1_000_000,
+    **tcp_info,
+}, sort_keys=True))
+print(f"{(total_done - start) / 1_000_000:.6f}")
 '''
     result = bench.run(
         label,
@@ -499,7 +606,18 @@ print(f"{(time.perf_counter_ns() - start) / 1_000_000:.6f}")
             endpoint.gateway, str(host_port), str(payload_bytes),
         ],
     )
-    return float(result.stdout.strip().splitlines()[-1])
+    lines = result.stdout.strip().splitlines()
+    try:
+        profile_line = next(line for line in lines if line.startswith("tcp_info="))
+        profile = json.loads(profile_line.removeprefix("tcp_info="))
+        duration_ms = float(lines[-1])
+    except (StopIteration, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{endpoint.runtime}: invalid guest-to-host TCP profile") from error
+    profile["runtime"] = endpoint.runtime
+    profile["label"] = label
+    with (bench.output / "guest-to-host-tcp-info.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(profile, sort_keys=True) + "\n")
+    return duration_ms
 
 
 def recv_exact(sock: socket.socket, length: int) -> bytes:
@@ -659,6 +777,7 @@ def main() -> int:
                 bench, runtime, args.network_image, args.network, payload_bytes, args.dial_port, args.prefix
             )
             endpoints.append(endpoint)
+            capture_guest_network_features(bench, endpoint)
 
         host_payload = b"h" * payload_bytes
         sample_metric(
