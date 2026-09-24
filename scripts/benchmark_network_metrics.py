@@ -216,7 +216,7 @@ print(json.dumps({"interface": interface, "features": features, "queues": queues
 """
 
 
-def capture_guest_network_features(bench: Benchmark, endpoint: Endpoint) -> None:
+def capture_guest_network_features(bench: Benchmark, endpoint: Endpoint) -> dict[str, object]:
     key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
     result = bench.run(
         f"{key}-guest-network-features",
@@ -229,6 +229,99 @@ def capture_guest_network_features(bench: Benchmark, endpoint: Endpoint) -> None
     payload["runtime"] = endpoint.runtime
     with (bench.output / "guest-network-features.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(payload, sort_keys=True) + "\n")
+    return payload
+
+
+GUEST_SET_TX_OFFLOADS = r"""
+import ctypes
+import glob
+import json
+import os
+import socket
+import sys
+
+SIOCETHTOOL = 0x8946
+GET_COMMANDS = {
+    "tx_checksum": 0x00000016,
+    "scatter_gather": 0x00000018,
+    "tso": 0x0000001E,
+    "gso": 0x00000023,
+}
+SET_COMMANDS = {
+    "tx_checksum": 0x00000017,
+    "scatter_gather": 0x00000019,
+    "tso": 0x0000001F,
+    "gso": 0x00000024,
+}
+
+
+class EthtoolValue(ctypes.Structure):
+    _fields_ = [("cmd", ctypes.c_uint32), ("data", ctypes.c_uint32)]
+
+
+class IfreqUnion(ctypes.Union):
+    _fields_ = [("data", ctypes.c_void_p), ("padding", ctypes.c_ubyte * 24)]
+
+
+class Ifreq(ctypes.Structure):
+    _fields_ = [("name", ctypes.c_char * 16), ("ifr_ifru", IfreqUnion)]
+
+
+interfaces = sorted(
+    os.path.basename(path)
+    for path in glob.glob("/sys/class/net/*")
+    if os.path.basename(path) != "lo"
+)
+if not interfaces:
+    raise SystemExit("no non-loopback network interface found")
+interface = interfaces[0]
+enabled = sys.argv[1] == "1"
+libc = ctypes.CDLL(None, use_errno=True)
+order = (
+    ("tx_checksum", "scatter_gather", "gso", "tso")
+    if enabled
+    else ("tso", "gso", "scatter_gather", "tx_checksum")
+)
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    for name in order:
+        value = EthtoolValue(SET_COMMANDS[name], int(enabled))
+        ifreq = Ifreq()
+        ifreq.name = interface.encode()
+        ifreq.ifr_ifru.data = ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
+        if libc.ioctl(sock.fileno(), SIOCETHTOOL, ctypes.byref(ifreq)) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), name)
+
+    features = {}
+    for name, command in GET_COMMANDS.items():
+        value = EthtoolValue(command, 0)
+        ifreq = Ifreq()
+        ifreq.name = interface.encode()
+        ifreq.ifr_ifru.data = ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
+        if libc.ioctl(sock.fileno(), SIOCETHTOOL, ctypes.byref(ifreq)) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), name)
+        features[name] = bool(value.data)
+
+if any(value != enabled for value in features.values()):
+    raise SystemExit(f"failed to set TX offloads to {enabled}: {features}")
+print(json.dumps({"interface": interface, "enabled": enabled, "features": features}, sort_keys=True))
+"""
+
+
+def set_guest_tx_offloads(
+    bench: Benchmark,
+    endpoint: Endpoint,
+    enabled: bool,
+    label: str,
+) -> None:
+    bench.run(
+        label,
+        [
+            "container", "exec", endpoint.container_id,
+            "python3", "-c", GUEST_SET_TX_OFFLOADS, "1" if enabled else "0",
+        ],
+    )
 
 
 def free_port(sock_type: int) -> int:
@@ -678,6 +771,49 @@ def sample_metric(
             bench.append(endpoint.runtime, metric, iteration, duration_ms, status)
 
 
+def benchmark_tx_offload_causality(
+    bench: Benchmark,
+    endpoint: Endpoint,
+    iterations: int,
+    payload_bytes: int,
+    payload_mib: int,
+) -> None:
+    key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+    try:
+        for iteration in range(1, iterations + 1):
+            states = (True, False) if iteration % 2 else (False, True)
+            for enabled in states:
+                mode = "on" if enabled else "off"
+                metric = f"network_guest_to_host_{payload_mib}m_tx_offloads_{mode}"
+                start = time.perf_counter_ns()
+                try:
+                    set_guest_tx_offloads(
+                        bench,
+                        endpoint,
+                        enabled,
+                        f"{key}-tx-offloads-{mode}-{iteration}",
+                    )
+                    with host_sink_server(endpoint.gateway, payload_bytes) as host_port:
+                        duration_ms = guest_http_upload(
+                            bench,
+                            endpoint,
+                            host_port,
+                            payload_bytes,
+                            f"{key}-guest-to-host-tx-offloads-{mode}-{iteration}",
+                        )
+                    status = 0
+                except Exception as error:
+                    duration_ms = elapsed_ms(start)
+                    status = 1
+                    bench.failed = True
+                    bench.log(
+                        f"{endpoint.runtime}: TX offload causality {mode} sample {iteration} failed: {error}"
+                    )
+                bench.append(endpoint.runtime, metric, iteration, duration_ms, status)
+    finally:
+        set_guest_tx_offloads(bench, endpoint, True, f"{key}-tx-offloads-restored")
+
+
 def run_dial_probe(bench: Benchmark, endpoints: list[Endpoint], iterations: int, dial_port: int) -> None:
     if len(endpoints) != 2:
         raise ValueError("RuntimeClient.dial benchmark requires exactly two runtime endpoints")
@@ -772,12 +908,13 @@ def main() -> int:
             bench, runtimes, args.image, args.network, (net_a, net_b), args.iterations, args.prefix
         )
 
+        feature_profiles: dict[str, dict[str, object]] = {}
         for runtime in runtimes:
             endpoint = start_endpoint(
                 bench, runtime, args.network_image, args.network, payload_bytes, args.dial_port, args.prefix
             )
             endpoints.append(endpoint)
-            capture_guest_network_features(bench, endpoint)
+            feature_profiles[runtime] = capture_guest_network_features(bench, endpoint)
 
         host_payload = b"h" * payload_bytes
         sample_metric(
@@ -805,6 +942,27 @@ def main() -> int:
             args.iterations,
             f"network_guest_to_host_{args.payload_mib}m",
             guest_to_host,
+        )
+        tx_offload_keys = ("tx_checksum", "scatter_gather", "gso", "tso")
+        offload_endpoints = [
+            endpoint
+            for endpoint in endpoints
+            if all(
+                feature_profiles[endpoint.runtime].get("features", {}).get(name) is True
+                for name in tx_offload_keys
+            )
+        ]
+        if len(offload_endpoints) != 1:
+            raise RuntimeError(
+                f"expected exactly one runtime with TX checksum/GSO/TSO enabled, got "
+                f"{[endpoint.runtime for endpoint in offload_endpoints]}"
+            )
+        benchmark_tx_offload_causality(
+            bench,
+            offload_endpoints[0],
+            args.iterations,
+            payload_bytes,
+            args.payload_mib,
         )
         sample_metric(
             bench,
