@@ -8,8 +8,10 @@ import contextlib
 import http.server
 import ipaddress
 import json
+import resource
 import shutil
 import socket
+import statistics
 import subprocess
 import sys
 import threading
@@ -155,6 +157,52 @@ def capture_krun_vmnet_profile(bench: Benchmark, app_root: Path | None, endpoint
         "\n".join(virtio_profile) + ("\n" if virtio_profile else ""),
         encoding="utf-8",
     )
+    virtio_rx_profile = [line for line in lines if "libkrun: virtio-net rx feedback profile" in line]
+    (bench.output / f"{key}-virtio-net-rx-feedback-profile.txt").write_text(
+        "\n".join(virtio_rx_profile) + ("\n" if virtio_rx_profile else ""),
+        encoding="utf-8",
+    )
+    vmnet_rx_profile = [line for line in lines if "libkrun: vmnet rx feedback profile" in line]
+    (bench.output / f"{key}-vmnet-rx-feedback-profile.txt").write_text(
+        "\n".join(vmnet_rx_profile) + ("\n" if vmnet_rx_profile else ""),
+        encoding="utf-8",
+    )
+
+
+def finalize_endpoint(bench: Benchmark, app_root: Path | None, endpoint: Endpoint) -> None:
+    if endpoint.container_id not in bench.active_containers:
+        return
+    key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+    try:
+        result = bench.run(
+            f"{key}-network-service-stop",
+            ["container", "stop", endpoint.container_id],
+            check=False,
+        )
+        if result.returncode != 0:
+            bench.failed = True
+            bench.log(f"{endpoint.runtime}: network service stop failed with status {result.returncode}")
+        capture_krun_vmnet_profile(bench, app_root, endpoint)
+        result = bench.run(
+            f"{key}-network-service-delete",
+            ["container", "delete", endpoint.container_id],
+            check=False,
+        )
+        if result.returncode != 0:
+            bench.failed = True
+            bench.log(f"{endpoint.runtime}: network service delete failed with status {result.returncode}")
+            return
+        bench.active_containers.discard(endpoint.container_id)
+        if not wait_port_bindable(socket.SOCK_STREAM, endpoint.tcp_port):
+            bench.failed = True
+            bench.log(f"{endpoint.runtime}: published TCP port was not released")
+        if not wait_port_bindable(socket.SOCK_DGRAM, endpoint.udp_port):
+            bench.failed = True
+            bench.log(f"{endpoint.runtime}: published UDP port was not released")
+    except Exception as error:
+        bench.failed = True
+        bench.log(f"{endpoint.runtime}: failed to preserve network diagnostics: {error}")
+
 
 
 GUEST_NET_FEATURE_PROBE = r"""
@@ -598,7 +646,17 @@ def http_upload(host: str, port: int, payload: bytes) -> float:
 
 
 @contextlib.contextmanager
-def host_sink_server(address: str, expected_bytes: int) -> Iterator[int]:
+def host_sink_server(
+    address: str,
+    expected_bytes: int,
+    *,
+    diagnostics_path: Path | None = None,
+    runtime: str | None = None,
+    label: str | None = None,
+) -> Iterator[int]:
+    diagnostics: list[dict[str, object]] = []
+    diagnostic_lock = threading.Lock()
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             if self.path != "/upload":
@@ -608,15 +666,52 @@ def host_sink_server(address: str, expected_bytes: int) -> Iterator[int]:
             if length != expected_bytes:
                 self.send_error(400)
                 return
+            usage_kind = getattr(resource, "RUSAGE_THREAD", resource.RUSAGE_SELF)
+            usage_before = resource.getrusage(usage_kind)
+            cpu_started = time.thread_time_ns()
+            body_started = time.perf_counter_ns()
             remaining = length
+            read_chunks: list[dict[str, float | int]] = []
             while remaining:
-                chunk = self.rfile.read(min(1024 * 1024, remaining))
+                requested = min(1024 * 1024, remaining)
+                read_started = time.perf_counter_ns()
+                chunk = self.rfile.read(requested)
+                read_done = time.perf_counter_ns()
                 if not chunk:
                     self.send_error(400)
                     return
                 remaining -= len(chunk)
+                read_chunks.append(
+                    {
+                        "bytes": len(chunk),
+                        "read_ms": (read_done - read_started) / 1_000_000,
+                        "elapsed_ms": (read_done - body_started) / 1_000_000,
+                    }
+                )
+            body_done = time.perf_counter_ns()
+            cpu_done = time.thread_time_ns()
+            usage_after = resource.getrusage(usage_kind)
             self.send_response(204)
             self.end_headers()
+            read_times = [float(chunk["read_ms"]) for chunk in read_chunks]
+            observation: dict[str, object] = {
+                "runtime": runtime,
+                "label": label,
+                "body_bytes": length,
+                "body_read_ms": (body_done - body_started) / 1_000_000,
+                "body_thread_cpu_ms": (cpu_done - cpu_started) / 1_000_000,
+                "voluntary_ctx_switches": usage_after.ru_nvcsw - usage_before.ru_nvcsw,
+                "involuntary_ctx_switches": usage_after.ru_nivcsw - usage_before.ru_nivcsw,
+                "read_count": len(read_chunks),
+                "read_max_ms": max(read_times, default=0.0),
+                "read_ge_100us": sum(value >= 0.1 for value in read_times),
+                "read_ge_250us": sum(value >= 0.25 for value in read_times),
+                "read_ge_500us": sum(value >= 0.5 for value in read_times),
+                "read_ge_1ms": sum(value >= 1.0 for value in read_times),
+                "reads": read_chunks,
+            }
+            with diagnostic_lock:
+                diagnostics.append(observation)
 
         def log_message(self, fmt: str, *args: object) -> None:
             pass
@@ -631,22 +726,234 @@ def host_sink_server(address: str, expected_bytes: int) -> Iterator[int]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        if diagnostics_path is not None and diagnostics:
+            with diagnostics_path.open("a", encoding="utf-8") as stream:
+                for observation in diagnostics:
+                    stream.write(json.dumps(observation, sort_keys=True) + "\n")
 
 
 def guest_http_upload(bench: Benchmark, endpoint: Endpoint, host_port: int, payload_bytes: int, label: str) -> float:
     script = r'''
 import http.client
 import json
+import resource
 import socket
 import struct
 import sys
+import threading
 import time
 
 host = sys.argv[1]
 port = int(sys.argv[2])
 payload_bytes = int(sys.argv[3])
 payload = b"g" * payload_bytes
+
+
+def read_tcp_info(sock):
+    if sock is None or not hasattr(socket, "TCP_INFO"):
+        return {}
+    info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 232)
+    result = {"tcp_info_len": len(info)}
+
+    def u32(offset):
+        return struct.unpack_from("=I", info, offset)[0] if len(info) >= offset + 4 else None
+
+    def u64(offset):
+        return struct.unpack_from("=Q", info, offset)[0] if len(info) >= offset + 8 else None
+
+    fields32 = {
+        "rto_us": 8,
+        "ato_us": 12,
+        "snd_mss": 16,
+        "rcv_mss": 20,
+        "unacked": 24,
+        "sacked": 28,
+        "lost": 32,
+        "retrans": 36,
+        "fackets": 40,
+        "pmtu": 60,
+        "rcv_ssthresh": 64,
+        "rtt_us": 68,
+        "rttvar_us": 72,
+        "snd_ssthresh": 76,
+        "snd_cwnd": 80,
+        "advmss": 84,
+        "reordering": 88,
+        "rcv_space": 96,
+        "total_retrans": 100,
+        "segs_out": 136,
+        "segs_in": 140,
+        "notsent_bytes": 144,
+        "min_rtt_us": 148,
+        "data_segs_in": 152,
+        "data_segs_out": 156,
+        "delivered": 192,
+        "delivered_ce": 196,
+        "dsack_dups": 216,
+        "reord_seen": 220,
+        "rcv_ooopack": 224,
+        "snd_wnd": 228,
+    }
+    fields64 = {
+        "pacing_rate": 104,
+        "max_pacing_rate": 112,
+        "bytes_acked": 120,
+        "bytes_received": 128,
+        "delivery_rate": 160,
+        "busy_time_us": 168,
+        "rwnd_limited_us": 176,
+        "sndbuf_limited_us": 184,
+        "bytes_sent": 200,
+        "bytes_retrans": 208,
+    }
+    for name, offset in fields32.items():
+        value = u32(offset)
+        if value is not None:
+            result[name] = value
+    for name, offset in fields64.items():
+        value = u64(offset)
+        if value is not None:
+            result[name] = value
+    result["sndbuf"] = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+    if hasattr(socket, "TCP_MAXSEG"):
+        result["tcp_maxseg"] = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG)
+    if hasattr(socket, "TCP_CONGESTION"):
+        value = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_CONGESTION, 64)
+        result["congestion_control"] = value.split(b"\0", 1)[0].decode(errors="replace")
+    if hasattr(socket, "TCP_NOTSENT_LOWAT"):
+        result["notsent_lowat"] = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT)
+    return result
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            return stream.read().strip()
+    except OSError:
+        return None
+
+
+def network_interface():
+    try:
+        names = sorted(name for name in __import__("os").listdir("/sys/class/net") if name != "lo")
+    except OSError:
+        return None
+    return names[0] if names else None
+
+
+def read_int(path):
+    value = read_text(path)
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def guest_network_snapshot(interface):
+    result = {}
+    if interface:
+        stats = {}
+        for name in (
+            "rx_bytes", "rx_packets", "rx_errors", "rx_dropped",
+            "tx_bytes", "tx_packets", "tx_errors", "tx_dropped",
+        ):
+            value = read_int(f"/sys/class/net/{interface}/statistics/{name}")
+            if value is not None:
+                stats[name] = value
+        result["interface"] = interface
+        result["netdev"] = stats
+        result["mtu"] = read_int(f"/sys/class/net/{interface}/mtu")
+        result["tx_queue_len"] = read_int(f"/sys/class/net/{interface}/tx_queue_len")
+
+    softirqs = read_text("/proc/softirqs")
+    if softirqs:
+        for line in softirqs.splitlines():
+            key, separator, values = line.partition(":")
+            if separator and key.strip() in {"NET_RX", "NET_TX"}:
+                numbers = [int(value) for value in values.split() if value.isdigit()]
+                result[f"softirq_{key.strip().lower()}"] = sum(numbers)
+
+    softnet = read_text("/proc/net/softnet_stat")
+    if softnet:
+        processed = dropped = time_squeeze = 0
+        rows = 0
+        for line in softnet.splitlines():
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            try:
+                processed += int(fields[0], 16)
+                dropped += int(fields[1], 16)
+                time_squeeze += int(fields[2], 16)
+                rows += 1
+            except ValueError:
+                continue
+        result["softnet"] = {
+            "cpus": rows,
+            "processed": processed,
+            "dropped": dropped,
+            "time_squeeze": time_squeeze,
+        }
+
+    interrupts = read_text("/proc/interrupts")
+    if interrupts:
+        relevant = []
+        for line in interrupts.splitlines():
+            lowered = line.lower()
+            if "virtio" not in lowered and (not interface or interface.lower() not in lowered):
+                continue
+            _, separator, rest = line.partition(":")
+            if not separator:
+                continue
+            count = 0
+            label = []
+            for field in rest.split():
+                if field.isdigit() and not label:
+                    count += int(field)
+                else:
+                    label.append(field)
+            relevant.append({"count": count, "label": " ".join(label)})
+        result["interrupts"] = relevant
+
+    sysctls = {}
+    for name, path in {
+        "tcp_limit_output_bytes": "/proc/sys/net/ipv4/tcp_limit_output_bytes",
+        "tcp_notsent_lowat": "/proc/sys/net/ipv4/tcp_notsent_lowat",
+        "netdev_budget": "/proc/sys/net/core/netdev_budget",
+        "netdev_budget_usecs": "/proc/sys/net/core/netdev_budget_usecs",
+        "default_qdisc": "/proc/sys/net/core/default_qdisc",
+    }.items():
+        value = read_text(path)
+        if value is not None:
+            sysctls[name] = value
+    result["sysctls"] = sysctls
+    return result
+
+
 connection = http.client.HTTPConnection(host, port, timeout=30)
+connection.connect()
+sock = connection.sock
+interface = network_interface()
+sample_origin = time.perf_counter_ns()
+timeline = []
+stop_sampling = threading.Event()
+
+
+def sample_tcp_info():
+    while not stop_sampling.is_set():
+        sample = read_tcp_info(sock)
+        sample["t_ms"] = (time.perf_counter_ns() - sample_origin) / 1_000_000
+        timeline.append(sample)
+        stop_sampling.wait(0.001)
+
+
+before = read_tcp_info(sock)
+guest_before = guest_network_snapshot(interface)
+sampler = threading.Thread(target=sample_tcp_info, daemon=True)
+sampler.start()
+usage_kind = getattr(resource, "RUSAGE_THREAD", resource.RUSAGE_SELF)
+usage_before = resource.getrusage(usage_kind)
+cpu_start = time.thread_time_ns()
 start = time.perf_counter_ns()
 try:
     connection.request(
@@ -656,42 +963,40 @@ try:
         headers={"Content-Length": str(payload_bytes)},
     )
     send_done = time.perf_counter_ns()
-    sock = connection.sock
-    tcp_info = {}
-    if sock is not None and hasattr(socket, "TCP_INFO"):
-        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
-        if len(info) >= 104:
-            fields = struct.unpack_from("=24x5I16x8I", info)
-            tcp_info = {
-                "unacked": fields[0],
-                "sacked": fields[1],
-                "lost": fields[2],
-                "retrans": fields[3],
-                "fackets": fields[4],
-                "pmtu": fields[5],
-                "rcv_ssthresh": fields[6],
-                "rtt_us": fields[7],
-                "rttvar_us": fields[8],
-                "snd_ssthresh": fields[9],
-                "snd_cwnd": fields[10],
-                "advmss": fields[11],
-                "reordering": fields[12],
-            }
-            tcp_info["total_retrans"] = struct.unpack_from("=I", info, 100)[0]
+    send_cpu_done = time.thread_time_ns()
+    usage_after_send = resource.getrusage(usage_kind)
+    stop_sampling.set()
+    sampler.join(timeout=1)
+    after_send = read_tcp_info(sock)
+    guest_after_send = guest_network_snapshot(interface)
     response = connection.getresponse()
     response.read()
     total_done = time.perf_counter_ns()
+    after_response = read_tcp_info(sock)
+    guest_after_response = guest_network_snapshot(interface)
 finally:
+    stop_sampling.set()
+    sampler.join(timeout=1)
     connection.close()
 if response.status != 204:
     raise SystemExit(f"expected HTTP 204, got {response.status}")
 print("tcp_info=" + json.dumps({
     "send_ms": (send_done - start) / 1_000_000,
+    "send_thread_cpu_ms": (send_cpu_done - cpu_start) / 1_000_000,
+    "send_voluntary_ctx_switches": usage_after_send.ru_nvcsw - usage_before.ru_nvcsw,
+    "send_involuntary_ctx_switches": usage_after_send.ru_nivcsw - usage_before.ru_nivcsw,
     "total_ms": (total_done - start) / 1_000_000,
-    **tcp_info,
+    "before": before,
+    "after_send": after_send,
+    "after_response": after_response,
+    "guest_before": guest_before,
+    "guest_after_send": guest_after_send,
+    "guest_after_response": guest_after_response,
+    "timeline": timeline,
 }, sort_keys=True))
 print(f"{(total_done - start) / 1_000_000:.6f}")
 '''
+
     result = bench.run(
         label,
         [
@@ -712,6 +1017,130 @@ print(f"{(total_done - start) / 1_000_000:.6f}")
     with (bench.output / "guest-to-host-tcp-info.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(profile, sort_keys=True) + "\n")
     return duration_ms
+
+
+def write_diagnostic_summary(bench: Benchmark) -> None:
+    def load_jsonl(path: Path) -> list[dict[str, object]]:
+        if not path.is_file():
+            return []
+        rows = []
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+        return rows
+
+    def nested_number(row: dict[str, object], *path: str) -> float | None:
+        value: object = row
+        for key in path:
+            if not isinstance(value, dict):
+                return None
+            value = value.get(key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def median(rows: list[dict[str, object]], *path: str) -> float | None:
+        values = [value for row in rows if (value := nested_number(row, *path)) is not None]
+        return statistics.median(values) if values else None
+
+    tcp_rows = load_jsonl(bench.output / "guest-to-host-tcp-info.jsonl")
+    sink_rows = load_jsonl(bench.output / "host-sink-timing.jsonl")
+    lines = ["guest-to-host diagnostic summary"]
+    runtimes = sorted(
+        {
+            str(row["runtime"])
+            for row in [*tcp_rows, *sink_rows]
+            if isinstance(row.get("runtime"), str)
+        }
+    )
+    for runtime in runtimes:
+        # Keep the primary samples separate from the explicit offload-causality
+        # samples so their changed NIC configuration does not skew the summary.
+        tx = [
+            row
+            for row in tcp_rows
+            if row.get("runtime") == runtime and "tx-offloads" not in str(row.get("label", ""))
+        ]
+        sink = [
+            row
+            for row in sink_rows
+            if row.get("runtime") == runtime and "tx-offloads" not in str(row.get("label", ""))
+        ]
+        lines.append(f"runtime={runtime} samples={len(tx)}")
+        fields = (
+            ("send_ms", ("send_ms",)),
+            ("total_ms", ("total_ms",)),
+            ("send_thread_cpu_ms", ("send_thread_cpu_ms",)),
+            ("send_voluntary_ctx_switches", ("send_voluntary_ctx_switches",)),
+            ("send_involuntary_ctx_switches", ("send_involuntary_ctx_switches",)),
+            ("after_send_rtt_us", ("after_send", "rtt_us")),
+            ("after_send_snd_cwnd", ("after_send", "snd_cwnd")),
+            ("after_send_unacked", ("after_send", "unacked")),
+            ("after_send_notsent_bytes", ("after_send", "notsent_bytes")),
+            ("after_send_delivery_rate", ("after_send", "delivery_rate")),
+            ("after_send_busy_time_us", ("after_send", "busy_time_us")),
+            ("after_send_rwnd_limited_us", ("after_send", "rwnd_limited_us")),
+            ("after_send_sndbuf_limited_us", ("after_send", "sndbuf_limited_us")),
+            ("after_send_total_retrans", ("after_send", "total_retrans")),
+            ("after_send_data_segs_out", ("after_send", "data_segs_out")),
+            ("after_send_segs_in", ("after_send", "segs_in")),
+        )
+        for name, path in fields:
+            value = median(tx, *path)
+            if value is not None:
+                lines.append(f"  median_{name}={value:.3f}")
+        if sink:
+            for name, path in (
+                ("host_body_read_ms", ("body_read_ms",)),
+                ("host_body_thread_cpu_ms", ("body_thread_cpu_ms",)),
+                ("host_read_max_ms", ("read_max_ms",)),
+                ("host_read_ge_1ms", ("read_ge_1ms",)),
+            ):
+                value = median(sink, *path)
+                if value is not None:
+                    lines.append(f"  median_{name}={value:.3f}")
+
+        timeline_unacked = []
+        timeline_notsent = []
+        timeline_cwnd = []
+        for row in tx:
+            timeline = row.get("timeline")
+            if not isinstance(timeline, list):
+                continue
+            for sample in timeline:
+                if not isinstance(sample, dict):
+                    continue
+                if isinstance(sample.get("unacked"), (int, float)):
+                    timeline_unacked.append(float(sample["unacked"]))
+                if isinstance(sample.get("notsent_bytes"), (int, float)):
+                    timeline_notsent.append(float(sample["notsent_bytes"]))
+                if isinstance(sample.get("snd_cwnd"), (int, float)):
+                    timeline_cwnd.append(float(sample["snd_cwnd"]))
+        if timeline_unacked:
+            lines.append(f"  timeline_max_unacked={max(timeline_unacked):.0f}")
+        if timeline_notsent:
+            lines.append(f"  timeline_max_notsent_bytes={max(timeline_notsent):.0f}")
+        if timeline_cwnd:
+            lines.append(f"  timeline_min_snd_cwnd={min(timeline_cwnd):.0f}")
+            lines.append(f"  timeline_max_snd_cwnd={max(timeline_cwnd):.0f}")
+
+    profile_specs = (
+        ("virtio-net TX", "container-runtime-krun-virtio-net-tx-profile.txt"),
+        ("virtio-net RX feedback", "container-runtime-krun-virtio-net-rx-feedback-profile.txt"),
+        ("vmnet TX", "container-runtime-krun-vmnet-tx-profile.txt"),
+        ("vmnet RX feedback", "container-runtime-krun-vmnet-rx-feedback-profile.txt"),
+    )
+    for title, filename in profile_specs:
+        path = bench.output / filename
+        if path.is_file():
+            profile_lines = [line for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line]
+            lines.append(f"{title}_profile_lines={len(profile_lines)}")
+            if profile_lines:
+                lines.append(f"  last={profile_lines[-1]}")
+
+    (bench.output / "diagnostic-summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def recv_exact(sock: socket.socket, length: int) -> bytes:
@@ -794,7 +1223,13 @@ def benchmark_tx_offload_causality(
                         enabled,
                         f"{key}-tx-offloads-{mode}-{iteration}",
                     )
-                    with host_sink_server(endpoint.gateway, payload_bytes) as host_port:
+                    with host_sink_server(
+                        endpoint.gateway,
+                        payload_bytes,
+                        diagnostics_path=bench.output / "host-sink-timing.jsonl",
+                        runtime=endpoint.runtime,
+                        label=f"{key}-guest-to-host-tx-offloads-{mode}-{iteration}",
+                    ) as host_port:
                         duration_ms = guest_http_upload(
                             bench,
                             endpoint,
@@ -927,14 +1362,21 @@ def main() -> int:
         )
 
         def guest_to_host(endpoint: Endpoint, iteration: int) -> float:
-            with host_sink_server(endpoint.gateway, payload_bytes) as host_port:
-                key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+            key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
+            label = f"{key}-guest-to-host-{iteration}"
+            with host_sink_server(
+                endpoint.gateway,
+                payload_bytes,
+                diagnostics_path=bench.output / "host-sink-timing.jsonl",
+                runtime=endpoint.runtime,
+                label=label,
+            ) as host_port:
                 return guest_http_upload(
                     bench,
                     endpoint,
                     host_port,
                     payload_bytes,
-                    f"{key}-guest-to-host-{iteration}",
+                    label,
                 )
 
         sample_metric(
@@ -982,23 +1424,17 @@ def main() -> int:
 
         run_dial_probe(bench, endpoints, args.iterations, args.dial_port)
 
-        for endpoint in endpoints:
-            key = "".join(ch if ch.isalnum() else "-" for ch in endpoint.runtime)
-            bench.run(f"{key}-network-service-stop", ["container", "stop", endpoint.container_id])
-            capture_krun_vmnet_profile(bench, app_root, endpoint)
-            bench.run(f"{key}-network-service-delete", ["container", "delete", endpoint.container_id])
-            bench.active_containers.discard(endpoint.container_id)
-            if not wait_port_bindable(socket.SOCK_STREAM, endpoint.tcp_port):
-                bench.failed = True
-                bench.log(f"{endpoint.runtime}: published TCP port was not released")
-            if not wait_port_bindable(socket.SOCK_DGRAM, endpoint.udp_port):
-                bench.failed = True
-                bench.log(f"{endpoint.runtime}: published UDP port was not released")
-
     except Exception as error:
         bench.failed = True
         bench.log(f"fatal benchmark setup error: {error}")
     finally:
+        for endpoint in endpoints:
+            finalize_endpoint(bench, app_root, endpoint)
+        try:
+            write_diagnostic_summary(bench)
+        except Exception as error:
+            bench.failed = True
+            bench.log(f"failed to summarize network diagnostics: {error}")
         bench.cleanup()
 
     return 1 if bench.failed else 0

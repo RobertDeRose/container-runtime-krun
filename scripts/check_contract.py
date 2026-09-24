@@ -82,11 +82,13 @@ if (
     )
     raise SystemExit(1)
 if (
-    "with host_sink_server(endpoint.gateway, payload_bytes)" not in benchmark_network_script
+    "with host_sink_server(" not in benchmark_network_script
+    or "endpoint.gateway," not in benchmark_network_script
+    or 'diagnostics_path=bench.output / "host-sink-timing.jsonl"' not in benchmark_network_script
     or "guest_http_upload(" not in benchmark_network_script
 ):
     print(
-        "network benchmark must send guest-to-host bulk payload to the host gateway",
+        "network benchmark must send guest-to-host bulk payload to the host gateway and preserve sink timing",
         file=sys.stderr,
     )
     raise SystemExit(1)
