@@ -67,6 +67,12 @@ public struct KrunVsockMapping: Codable, Sendable, Equatable {
   }
 }
 
+public enum KrunNetworkFeatures {
+  // Guest TX checksum + TCPv4 segmentation completed by libkrun before
+  // raw Ethernet reaches vmnet. Keep in sync with VMNET_SOFTWARE_TX_FEATURES.
+  public static let nativeVMNetSoftwareTXOffload: UInt32 = (1 << 0) | (1 << 11)
+}
+
 public struct KrunNetworkConfig: Codable, Sendable, Equatable {
   public let ipv4Gateway: String
   public let ipv4Mask: String

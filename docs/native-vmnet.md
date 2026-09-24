@@ -10,9 +10,12 @@ and attachment lifetime. The existing managed `krun` network resolution remains
 unchanged. The runtime passes the assigned subnet and MAC to
 `krun_add_net_vmnet_shared`, not `krun_add_net_unixgram`.
 
-libkrun starts an isolated shared-mode vmnet interface in each VMM process and
-requires zero offload features. Matching interfaces use the same Apple-owned
-allocationOnly subnet without taking an exclusive `vmnet_network_ref` reservation,
+libkrun starts an isolated shared-mode vmnet interface in each VMM process. The
+runtime advertises guest TX checksum and TCPv4 segmentation support; libkrun
+completes those operations in software before sending ordinary raw Ethernet to
+vmnet. vmnet's own checksum/TSO mode remains disabled. Matching interfaces use the
+same Apple-owned allocationOnly subnet without taking an exclusive
+`vmnet_network_ref` reservation,
 so concurrent VMM processes can coexist on that subnet. The guest remains
 statically configured from Apple's attachment and does not run a DHCP client; the
 shared-mode vmnet DHCP service is not used by the runtime. libkrun's internal

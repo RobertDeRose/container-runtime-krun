@@ -24,7 +24,8 @@ public enum KrunVMNetBackend {
         return KrunNetworkConfig(
           ipv4Gateway: attachment.ipv4Gateway.description,
           ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
-          macAddress: macAddress.bytes
+          macAddress: macAddress.bytes,
+          features: KrunNetworkFeatures.nativeVMNetSoftwareTXOffload
         )
       case "reserved":
         throw ContainerizationError(

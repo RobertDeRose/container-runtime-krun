@@ -29,6 +29,7 @@ from macho_trust import check_privileged_path, parse_load_commands, trusted_syst
 
 TRUSTED = Path('/Library/PrivilegedHelperTools/com.github.robertderose.container-runtime-krun')
 HELPER = TRUSTED / 'bin/container-krun-vmm-helper'
+VMNET_SOFTWARE_TX_FEATURES = 2049
 LIBRARY = TRUSTED / 'lib/libkrun.dylib'
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANAGED_LIBKRUN = PROJECT_ROOT / '.build-deps/libkrun'
@@ -81,11 +82,16 @@ def native_trace(text: str, config: dict[str, Any], uid: int, gid: int) -> int:
     interfaces = config.get('networks', [])
     require(isinstance(interfaces, list) and len(interfaces) == 1, 'this validation requires exactly one NIC')
     interface = interfaces[0]
-    require('socketPath' not in interface and interface.get('features') == 0 and interface.get('flags') == 0,
-            'helper configuration uses a packet socket, offloads, or DHCP')
+    require(
+        'socketPath' not in interface
+        and interface.get('features') == VMNET_SOFTWARE_TX_FEATURES
+        and interface.get('flags') == 0,
+        'helper configuration does not use the required native vmnet software TX feature set',
+    )
     ready = selected['native vmnet interface ready']
     for key, value in {'api': 'krun_add_net_vmnet_shared', 'backend': 'libkrun-vmnet-shared',
-                       'network_index': '0', 'features': '0', 'flags': '0', 'vmnet_api': 'vmnet_start_interface',
+                       'network_index': '0', 'features': str(VMNET_SOFTWARE_TX_FEATURES),
+                       'flags': '0', 'vmnet_api': 'vmnet_start_interface',
                        'guest_dhcp': 'false', 'isolated': 'true',
                        'gateway': interface['ipv4Gateway'], 'netmask': interface['ipv4Mask']}.items():
         require(ready.get(key) == value, f'native backend attestation mismatch: {key}')
