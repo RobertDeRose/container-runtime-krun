@@ -560,6 +560,7 @@ def start_endpoint(
         [
             "container", "run", "-d", "--name", container_id,
             "--runtime", runtime, "--network", network,
+            "--cap-add", "NET_ADMIN",
             "--publish", f"127.0.0.1:{tcp_port}:8080/tcp",
             "--publish", f"127.0.0.1:{udp_port}:8081/udp",
             "--publish", f"127.0.0.1:{http_port}:8082/tcp",
