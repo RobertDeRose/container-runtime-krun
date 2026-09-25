@@ -157,6 +157,11 @@ def capture_krun_vmnet_profile(bench: Benchmark, app_root: Path | None, endpoint
         "\n".join(virtio_profile) + ("\n" if virtio_profile else ""),
         encoding="utf-8",
     )
+    staged_gso_profile = [line for line in lines if "libkrun: vmnet staged gso profile" in line]
+    (bench.output / f"{key}-vmnet-staged-gso-profile.txt").write_text(
+        "\n".join(staged_gso_profile) + ("\n" if staged_gso_profile else ""),
+        encoding="utf-8",
+    )
     virtio_rx_profile = [line for line in lines if "libkrun: virtio-net rx feedback profile" in line]
     (bench.output / f"{key}-virtio-net-rx-feedback-profile.txt").write_text(
         "\n".join(virtio_rx_profile) + ("\n" if virtio_rx_profile else ""),
@@ -752,7 +757,13 @@ payload = b"g" * payload_bytes
 def read_tcp_info(sock):
     if sock is None or not hasattr(socket, "TCP_INFO"):
         return {}
-    info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 232)
+    try:
+        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 232)
+    except OSError as error:
+        # HTTPConnection may close a zero-length response before the final
+        # diagnostic snapshot. TCP_INFO is evidence only; never fail the
+        # transfer after its payload was already measured successfully.
+        return {"tcp_info_error": str(error), "tcp_info_errno": error.errno}
     result = {"tcp_info_len": len(info)}
 
     def u32(offset):
@@ -1128,6 +1139,7 @@ def write_diagnostic_summary(bench: Benchmark) -> None:
 
     profile_specs = (
         ("virtio-net TX", "container-runtime-krun-virtio-net-tx-profile.txt"),
+        ("vmnet staged GSO", "container-runtime-krun-vmnet-staged-gso-profile.txt"),
         ("virtio-net RX feedback", "container-runtime-krun-virtio-net-rx-feedback-profile.txt"),
         ("vmnet TX", "container-runtime-krun-vmnet-tx-profile.txt"),
         ("vmnet RX feedback", "container-runtime-krun-vmnet-rx-feedback-profile.txt"),
@@ -1395,18 +1407,23 @@ def main() -> int:
                 for name in tx_offload_keys
             )
         ]
-        if len(offload_endpoints) != 1:
-            raise RuntimeError(
-                f"expected exactly one runtime with TX checksum/GSO/TSO enabled, got "
-                f"{[endpoint.runtime for endpoint in offload_endpoints]}"
+        if len(offload_endpoints) == 1:
+            benchmark_tx_offload_causality(
+                bench,
+                offload_endpoints[0],
+                args.iterations,
+                payload_bytes,
+                args.payload_mib,
             )
-        benchmark_tx_offload_causality(
-            bench,
-            offload_endpoints[0],
-            args.iterations,
-            payload_bytes,
-            args.payload_mib,
-        )
+        else:
+            # This probe established the original offload causality. Once both
+            # runtimes advertise the feature set it is no longer a meaningful
+            # one-sided A/B test, and must not invalidate the primary samples.
+            (bench.output / "tx-offload-causality-skipped.txt").write_text(
+                "expected exactly one runtime with TX checksum/GSO/TSO enabled; "
+                f"found {[endpoint.runtime for endpoint in offload_endpoints]}\n",
+                encoding="utf-8",
+            )
         sample_metric(
             bench,
             endpoints,
