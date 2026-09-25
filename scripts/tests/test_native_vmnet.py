@@ -19,14 +19,14 @@ import native_vmnet_validation as validation
 def config() -> dict:
     return {'networks': [{'ipv4Gateway': '192.168.200.1', 'ipv4Mask': '255.255.255.0',
                            'macAddress': [2, 0, 0, 0, 0, 1],
-                           'features': validation.VMNET_SOFTWARE_TX_FEATURES, 'flags': 0}]}
+                           'features': validation.VMNET_NATIVE_TCP_FEATURES, 'flags': 0}]}
 
 
 def trace() -> str:
     return f'''helper lifecycle [event=helper start] [pid=123] [uid=0] [euid=0]
 helper lifecycle [event=libkrun loaded] [path={validation.LIBRARY}]
 helper lifecycle [event=context created] [default_firmware=disabled]
-helper lifecycle [event=native vmnet interface ready] [backend=libkrun-vmnet-shared] [api=krun_add_net_vmnet_shared] [network_index=0] [features=2049] [flags=0] [gateway=192.168.200.1] [netmask=255.255.255.0] [guest_dhcp=false] [isolated=true] [vmnet_api=vmnet_start_interface]
+helper lifecycle [event=native vmnet interface ready] [backend=libkrun-vmnet-shared] [api=krun_add_net_vmnet_shared] [network_index=0] [features=6531] [flags=0] [gateway=192.168.200.1] [netmask=255.255.255.0] [guest_dhcp=false] [isolated=true] [vmnet_api=vmnet_start_interface]
 helper lifecycle [event=helper privileges dropped] [pid=123] [uid=502] [euid=502] [gid=20] [egid=20] [root_regain_blocked=true]
 helper lifecycle [event=basic VM configuration complete]
 helper lifecycle [event=device configuration complete]

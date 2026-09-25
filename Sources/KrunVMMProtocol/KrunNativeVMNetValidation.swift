@@ -15,10 +15,10 @@ extension KrunNetworkConfig {
       throw KrunNativeVMNetError(description: "native vmnet requires a six-byte unicast MAC")
     }
     guard
-      (features == 0 || features == KrunNetworkFeatures.nativeVMNetSoftwareTXOffload), flags == 0
+      (features == 0 || features == KrunNetworkFeatures.nativeVMNetTCPOffload), flags == 0
     else {
       throw KrunNativeVMNetError(
-        description: "native vmnet requires features=0 or software TX offload and flags=0"
+        description: "native vmnet requires features=0 or native TCP offload and flags=0"
       )
     }
     for value in [ipv4Gateway, ipv4Mask] {

@@ -98,16 +98,16 @@ def native_trace_many(text: str, config: dict[str, Any], uid: int, gid: int) -> 
     for index, interface in enumerate(networks):
         require(
             'socketPath' not in interface
-            and interface.get('features') == native.VMNET_SOFTWARE_TX_FEATURES
+            and interface.get('features') == native.VMNET_NATIVE_TCP_FEATURES
             and interface.get('flags') == 0,
-            f'network {index} does not use the required native vmnet software TX feature set',
+            f'network {index} does not use the required native vmnet native TCP feature set',
         )
         event = by_index[index]
         expected = {
             'api': 'krun_add_net_vmnet_shared',
             'backend': 'libkrun-vmnet-shared',
             'network_index': str(index),
-            'features': str(native.VMNET_SOFTWARE_TX_FEATURES),
+            'features': str(native.VMNET_NATIVE_TCP_FEATURES),
             'flags': '0',
             'vmnet_api': 'vmnet_start_interface',
             'guest_dhcp': 'false',
