@@ -122,12 +122,23 @@ def capture_command(output: Path, name: str, argv: list[str], timeout: int = 30)
     return status
 
 
-def run_sample(pid: int, seconds: int, output: Path) -> None:
+def sample_argv(pid: int, seconds: int, interval_ms: int, sample_path: Path) -> list[str]:
+    return privileged_argv(
+        [
+            "/usr/bin/sample",
+            str(pid),
+            str(seconds),
+            str(interval_ms),
+            "-file",
+            str(sample_path),
+        ]
+    )
+
+
+def run_sample(pid: int, seconds: int, interval_ms: int, output: Path) -> None:
     sample_path = output / "vmm-sample.txt"
     status_path = output / "vmm-sample-status.txt"
-    argv = privileged_argv(
-        ["/usr/bin/sample", str(pid), str(seconds), "-file", str(sample_path)]
-    )
+    argv = sample_argv(pid, seconds, interval_ms, sample_path)
     result = subprocess.run(argv, capture_output=True, text=True, timeout=seconds + 30, check=False)
     status_path.write_text(
         f"$ {' '.join(argv)}\n{result.stdout}{result.stderr}\nexit_status={result.returncode}\n",
@@ -207,6 +218,7 @@ def main() -> int:
     parser.add_argument("--warmup-seconds", type=float, default=3.0)
     parser.add_argument("--sample-delay", type=float, default=2.0)
     parser.add_argument("--sample-seconds", type=int, default=20)
+    parser.add_argument("--sample-interval-ms", type=int, default=10)
     parser.add_argument("--chunk-kib", type=int, default=256)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--result-root", type=Path, default=Path("validation-results"))
@@ -216,8 +228,10 @@ def main() -> int:
         parser.error("profile:network-streams requires macOS")
     if args.streams <= 0 or args.seconds <= 0 or args.warmup_seconds <= 0 or args.chunk_kib <= 0:
         parser.error("streams, seconds, warmup-seconds, and chunk-kib must be positive")
-    if args.sample_delay < 0 or args.sample_seconds <= 0:
-        parser.error("sample-delay must be non-negative and sample-seconds must be positive")
+    if args.sample_delay < 0 or args.sample_seconds <= 0 or args.sample_interval_ms <= 0:
+        parser.error(
+            "sample-delay must be non-negative and sample-seconds/sample-interval-ms must be positive"
+        )
     if args.sample_delay + args.sample_seconds >= args.seconds:
         parser.error("sample-delay + sample-seconds must be less than the source duration")
     if not Path("/usr/bin/sample").is_file():
@@ -253,6 +267,7 @@ def main() -> int:
         "warmup_seconds": args.warmup_seconds,
         "sample_delay": args.sample_delay,
         "sample_seconds": args.sample_seconds,
+        "sample_interval_ms": args.sample_interval_ms,
         "chunk_kib": args.chunk_kib,
         "repository_head": streams_bench.git_head(Path.cwd()),
         "libkrun_head": streams_bench.git_head(Path(".build-deps/libkrun")),
@@ -312,7 +327,7 @@ def main() -> int:
         (output / "ps-profile-start.txt").write_text(process_listing(), encoding="utf-8")
         top_proc = start_top(helper_pid, args.sample_seconds, output)
         try:
-            run_sample(helper_pid, args.sample_seconds, output)
+            run_sample(helper_pid, args.sample_seconds, args.sample_interval_ms, output)
             capture_command(output, "vmm-threads-during.txt", thread_snapshot_argv(helper_pid))
         finally:
             finish_top(top_proc, args.sample_seconds + 10)

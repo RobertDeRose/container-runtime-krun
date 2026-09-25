@@ -8,6 +8,7 @@
 #USAGE flag "--warmup-seconds <seconds>" help="Warmup duration before profiling" default="3"
 #USAGE flag "--sample-delay <seconds>" help="Delay after source start before attaching sample" default="2"
 #USAGE flag "--sample-seconds <seconds>" help="macOS sample/top capture duration" default="20"
+#USAGE flag "--sample-interval-ms <milliseconds>" help="macOS sample interval in milliseconds" default="10"
 #USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
 #USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
 #USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
@@ -23,6 +24,7 @@ exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/profile_network_
   --warmup-seconds "${usage_warmup_seconds?}" \
   --sample-delay "${usage_sample_delay?}" \
   --sample-seconds "${usage_sample_seconds?}" \
+  --sample-interval-ms "${usage_sample_interval_ms?}" \
   --chunk-kib "${usage_chunk_kib?}" \
   --timeout "${usage_timeout?}" \
   --result-root "${usage_result_root?}"

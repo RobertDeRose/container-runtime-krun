@@ -27,6 +27,23 @@ class ProfilerCommandTests(unittest.TestCase):
         self.assertNotIn("tid", " ".join(argv))
         self.assertIn("%cpu", argv[-1])
 
+    def test_sample_argv_uses_requested_interval(self):
+        argv = profile.sample_argv(123, 20, 10, pathlib.Path("sample.txt"))
+        self.assertEqual(
+            argv,
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "--",
+                "/usr/bin/sample",
+                "123",
+                "20",
+                "10",
+                "-file",
+                "sample.txt",
+            ],
+        )
+
 
 class ProcessDiscoveryTests(unittest.TestCase):
     def test_helper_pids_extracts_only_vmm_helpers(self):
