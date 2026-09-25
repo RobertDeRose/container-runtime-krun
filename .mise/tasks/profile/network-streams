@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#MISE description="Profile sustained krun P8 guest-to-host throughput with macOS sample/top"
+#USAGE flag "--runtime <runtime>" help="Runtime to profile" default="container-runtime-krun"
+#USAGE flag "--network <network>" help="Apple Container network" default="default"
+#USAGE flag "--image <image>" help="Python image used for benchmark endpoint" default="python:3.13-alpine"
+#USAGE flag "--streams <streams>" help="Parallel guest-to-host streams" default="8"
+#USAGE flag "--seconds <seconds>" help="Total sustained source duration" default="30"
+#USAGE flag "--warmup-seconds <seconds>" help="Warmup duration before profiling" default="3"
+#USAGE flag "--sample-delay <seconds>" help="Delay after source start before attaching sample" default="2"
+#USAGE flag "--sample-seconds <seconds>" help="macOS sample/top capture duration" default="20"
+#USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
+#USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
+#USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
+
+set -euo pipefail
+
+exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/profile_network_streams.py" \
+  --runtime "${usage_runtime?}" \
+  --network "${usage_network?}" \
+  --image "${usage_image?}" \
+  --streams "${usage_streams?}" \
+  --seconds "${usage_seconds?}" \
+  --warmup-seconds "${usage_warmup_seconds?}" \
+  --sample-delay "${usage_sample_delay?}" \
+  --sample-seconds "${usage_sample_seconds?}" \
+  --chunk-kib "${usage_chunk_kib?}" \
+  --timeout "${usage_timeout?}" \
+  --result-root "${usage_result_root?}"

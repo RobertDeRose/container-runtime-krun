@@ -66,11 +66,38 @@ for required in (
         print(f"benchmark:network-streams mise usage contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 
+profile_network_task = ROOT / ".mise/tasks/profile/network-streams"
+if not profile_network_task.is_file():
+    print("profile:network-streams must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+profile_network_task_text = profile_network_task.read_text()
+for required in (
+    '#USAGE flag "--streams <streams>"',
+    'default="8"',
+    '#USAGE flag "--sample-seconds <seconds>"',
+    'exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/profile_network_streams.py"',
+):
+    if required not in profile_network_task_text:
+        print(f"profile:network-streams mise usage contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+profile_network_script = (ROOT / "scripts/profile_network_streams.py").read_text()
+for required in (
+    'HELPER_NAME = "container-krun-vmm-helper"',
+    '"/usr/bin/sample"',
+    '"vmm-sample.txt"',
+    '"vmm-top.txt"',
+    'streams_bench.SinkServer(endpoint.gateway)',
+):
+    if required not in profile_network_script:
+        print(f"network stream profiler contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 network_stream_script = (ROOT / "scripts/benchmark_network_streams.py").read_text()
 for required in (
     '"guest_to_host"',
     '"host_to_guest"',
-    'endpoint.guest_ip',
+    '"127.0.0.1", endpoint.published_port',
     'SinkServer(endpoint.gateway)',
     'threading.Barrier(streams + 1',
     'runtime_b_over_a',
