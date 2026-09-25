@@ -146,6 +146,7 @@ class Endpoint:
     container_id: str
     guest_ip: str
     gateway: str
+    published_port: int
 
 
 @dataclass(frozen=True)
@@ -366,6 +367,12 @@ def parse_json_line(output: str) -> dict[str, object]:
     raise ValueError("command did not emit a JSON result")
 
 
+def free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def inspect_endpoint(bench: Benchmark, container_id: str) -> tuple[str, str]:
     deadline = time.monotonic() + 20
     last = ""
@@ -416,18 +423,20 @@ def wait_ready(bench: Benchmark, container_id: str) -> None:
 def start_endpoint(bench: Benchmark, runtime: str, image: str, network: str, prefix: str) -> Endpoint:
     key = "".join(ch if ch.isalnum() else "-" for ch in runtime)
     container_id = f"{prefix}-{key}"
+    published_port = free_tcp_port()
     bench.active_containers.add(container_id)
     bench.run(
         f"{key}-start",
         [
             "container", "run", "-d", "--name", container_id,
             "--runtime", runtime, "--network", network,
+            "--publish", f"127.0.0.1:{published_port}:{GUEST_SINK_PORT}/tcp",
             image, "python3", "-u", "-c", GUEST_SINK_SERVER, str(GUEST_SINK_PORT),
         ],
     )
     wait_ready(bench, container_id)
     guest_ip, gateway = inspect_endpoint(bench, container_id)
-    return Endpoint(runtime, container_id, guest_ip, gateway)
+    return Endpoint(runtime, container_id, guest_ip, gateway, published_port)
 
 
 def guest_source(
@@ -464,7 +473,7 @@ def run_direction(
 ) -> None:
     def measure(endpoint: Endpoint, duration: float, label: str) -> dict[str, object]:
         if direction == "host_to_guest":
-            result = run_source(endpoint.guest_ip, GUEST_SINK_PORT, streams, duration, chunk_bytes)
+            result = run_source("127.0.0.1", endpoint.published_port, streams, duration, chunk_bytes)
             (bench.output / f"{label}.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
             return result
         if direction == "guest_to_host":
@@ -704,6 +713,8 @@ def main() -> int:
         "warmup_seconds": args.warmup_seconds,
         "iterations": args.iterations,
         "ordering": "odd iterations A/B; even iterations B/A",
+        "guest_to_host_transport": "guest to host gateway listener",
+        "host_to_guest_transport": "published TCP port to guest sink",
         "chunk_kib": args.chunk_kib,
         "repository_head": git_head(Path.cwd()),
         "libkrun_head": git_head(Path(".build-deps/libkrun")),

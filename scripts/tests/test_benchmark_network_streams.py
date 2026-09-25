@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -74,6 +75,48 @@ class ProtocolTests(unittest.TestCase):
         self.assertGreater(result["elapsed_seconds"], 0)
         self.assertGreaterEqual(result["completion_elapsed_seconds"], result["elapsed_seconds"])
         self.assertGreater(result["mib_per_second"], 0)
+
+    def test_host_to_guest_uses_published_port(self):
+        calls = []
+        original = network_streams.run_source
+
+        def fake_run_source(host, port, streams, seconds, chunk_bytes):
+            calls.append((host, port, streams, seconds, chunk_bytes))
+            return {
+                "bytes": 1024,
+                "elapsed_seconds": 1.0,
+                "completion_elapsed_seconds": 1.0,
+                "mib_per_second": 1.0,
+                "streams": streams,
+            }
+
+        try:
+            network_streams.run_source = fake_run_source
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bench = network_streams.Benchmark(pathlib.Path(temp_dir), timeout=5)
+                endpoint = network_streams.Endpoint(
+                    "runtime",
+                    "container",
+                    "192.0.2.2",
+                    "192.0.2.1",
+                    54321,
+                )
+                network_streams.run_direction(
+                    bench,
+                    [endpoint],
+                    "host_to_guest",
+                    streams=4,
+                    seconds=0.1,
+                    warmup_seconds=0.01,
+                    iterations=1,
+                    chunk_bytes=1024,
+                )
+        finally:
+            network_streams.run_source = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(host == "127.0.0.1" for host, *_ in calls))
+        self.assertTrue(all(port == 54321 for _, port, *_ in calls))
 
     def test_parse_json_line_uses_last_json_object(self):
         result = network_streams.parse_json_line('noise\n{"bytes": 1}\n')
