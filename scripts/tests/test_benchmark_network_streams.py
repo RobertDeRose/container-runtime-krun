@@ -76,6 +76,19 @@ class ProtocolTests(unittest.TestCase):
         self.assertGreaterEqual(result["completion_elapsed_seconds"], result["elapsed_seconds"])
         self.assertGreater(result["mib_per_second"], 0)
 
+
+    def test_embedded_protocol_scripts_compile(self):
+        compile(network_streams.GUEST_SINK_SERVER, "<guest-sink>", "exec")
+        compile(network_streams.GUEST_SOURCE, "<guest-source>", "exec")
+
+    def test_stream_protocol_does_not_require_half_close(self):
+        class NoHalfCloseSocket:
+            def shutdown(self, *_args, **_kwargs):
+                raise AssertionError("stream protocol must not half-close the connection")
+
+        self.assertFalse("shutdown(socket.SHUT_WR)" in network_streams.GUEST_SOURCE)
+        self.assertNotIn("shutdown(socket.SHUT_WR)", pathlib.Path(network_streams.__file__).read_text())
+
     def test_host_to_guest_uses_published_port(self):
         calls = []
         original = network_streams.run_source

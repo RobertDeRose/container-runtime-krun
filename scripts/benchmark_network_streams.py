@@ -22,6 +22,8 @@ from pathlib import Path
 
 MIB = 1024 * 1024
 GUEST_SINK_PORT = 8090
+STREAM_TRAILER_MAGIC = b"\x00KRUN_STREAM_END\x00"
+STREAM_TRAILER_LEN = len(STREAM_TRAILER_MAGIC) + 8
 
 GUEST_SINK_SERVER = r'''
 import socket
@@ -30,16 +32,28 @@ import threading
 import time
 
 PORT = int(__import__("sys").argv[1])
+TRAILER_MAGIC = b"\x00KRUN_STREAM_END\x00"
+TRAILER_LEN = len(TRAILER_MAGIC) + 8
 
 def handle(conn):
-    total = 0
+    wire_bytes = 0
+    tail = b""
     with conn:
         while True:
             data = conn.recv(256 * 1024)
             if not data:
-                break
-            total += len(data)
-        conn.sendall(struct.pack("!Q", total))
+                raise RuntimeError("source closed before stream trailer")
+            wire_bytes += len(data)
+            tail = (tail + data)[-TRAILER_LEN:]
+            if len(tail) == TRAILER_LEN and tail.startswith(TRAILER_MAGIC):
+                expected = struct.unpack("!Q", tail[len(TRAILER_MAGIC):])[0]
+                received = wire_bytes - TRAILER_LEN
+                if received != expected:
+                    raise RuntimeError(
+                        f"stream byte mismatch expected={expected} received={received}"
+                    )
+                conn.sendall(struct.pack("!Q", received))
+                return
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -65,6 +79,7 @@ streams = int(sys.argv[3])
 seconds = float(sys.argv[4])
 chunk_bytes = int(sys.argv[5])
 chunk = b"s" * chunk_bytes
+TRAILER_MAGIC = b"\x00KRUN_STREAM_END\x00"
 state = {}
 errors = []
 results = []
@@ -97,7 +112,7 @@ def worker():
                 sock.sendall(chunk)
                 sent += len(chunk)
             send_end_ns = time.perf_counter_ns()
-            sock.shutdown(socket.SHUT_WR)
+            sock.sendall(TRAILER_MAGIC + struct.pack("!Q", sent))
             received = struct.unpack("!Q", recv_exact(sock, 8))[0]
             if received != sent:
                 raise RuntimeError(f"sink byte mismatch sent={sent} received={received}")
@@ -191,16 +206,26 @@ class SinkServer:
             worker.start()
 
     def _handle(self, conn: socket.socket) -> None:
-        total = 0
+        wire_bytes = 0
+        tail = b""
         try:
             with conn:
                 conn.settimeout(30)
                 while True:
                     data = conn.recv(256 * 1024)
                     if not data:
-                        break
-                    total += len(data)
-                conn.sendall(struct.pack("!Q", total))
+                        raise RuntimeError("source closed before stream trailer")
+                    wire_bytes += len(data)
+                    tail = (tail + data)[-STREAM_TRAILER_LEN:]
+                    if len(tail) == STREAM_TRAILER_LEN and tail.startswith(STREAM_TRAILER_MAGIC):
+                        expected = struct.unpack("!Q", tail[len(STREAM_TRAILER_MAGIC):])[0]
+                        received = wire_bytes - STREAM_TRAILER_LEN
+                        if received != expected:
+                            raise RuntimeError(
+                                f"stream byte mismatch expected={expected} received={received}"
+                            )
+                        conn.sendall(struct.pack("!Q", received))
+                        return
         except Exception as error:
             self.errors.append(repr(error))
 
@@ -314,7 +339,7 @@ def run_source(host: str, port: int, streams: int, seconds: float, chunk_bytes: 
                     sock.sendall(chunk)
                     sent += len(chunk)
                 send_end_ns = time.perf_counter_ns()
-                sock.shutdown(socket.SHUT_WR)
+                sock.sendall(STREAM_TRAILER_MAGIC + struct.pack("!Q", sent))
                 received = struct.unpack("!Q", recv_exact(sock, 8))[0]
                 if received != sent:
                     raise RuntimeError(f"sink byte mismatch sent={sent} received={received}")
