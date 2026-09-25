@@ -20,6 +20,7 @@ import benchmark_network_streams as streams_bench
 
 
 HELPER_NAME = "container-krun-vmm-helper"
+SUDO_PATH = "/usr/bin/sudo"
 
 
 def process_listing() -> str:
@@ -77,6 +78,27 @@ def find_new_helper(before: set[int], listing: str, container_id: str) -> int:
     )
 
 
+def privileged_argv(argv: list[str]) -> list[str]:
+    return [SUDO_PATH, "-n", "--", *argv]
+
+
+def authorize_profiler() -> None:
+    result = subprocess.run([SUDO_PATH, "-v"], check=False)
+    if result.returncode != 0:
+        raise RuntimeError("sudo authorization is required to profile the VMM helper")
+
+
+def thread_snapshot_argv(pid: int) -> list[str]:
+    return [
+        "/bin/ps",
+        "-M",
+        "-p",
+        str(pid),
+        "-o",
+        "pid=,%cpu=,state=,time=,command=",
+    ]
+
+
 def capture_command(output: Path, name: str, argv: list[str], timeout: int = 30) -> int:
     try:
         result = subprocess.run(
@@ -103,7 +125,9 @@ def capture_command(output: Path, name: str, argv: list[str], timeout: int = 30)
 def run_sample(pid: int, seconds: int, output: Path) -> None:
     sample_path = output / "vmm-sample.txt"
     status_path = output / "vmm-sample-status.txt"
-    argv = ["/usr/bin/sample", str(pid), str(seconds), "-file", str(sample_path)]
+    argv = privileged_argv(
+        ["/usr/bin/sample", str(pid), str(seconds), "-file", str(sample_path)]
+    )
     result = subprocess.run(argv, capture_output=True, text=True, timeout=seconds + 30, check=False)
     status_path.write_text(
         f"$ {' '.join(argv)}\n{result.stdout}{result.stderr}\nexit_status={result.returncode}\n",
@@ -198,6 +222,10 @@ def main() -> int:
         parser.error("sample-delay + sample-seconds must be less than the source duration")
     if not Path("/usr/bin/sample").is_file():
         parser.error("/usr/bin/sample is unavailable")
+    if not Path(SUDO_PATH).is_file():
+        parser.error(f"{SUDO_PATH} is unavailable")
+
+    authorize_profiler()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     token = f"{stamp}-{os.getpid()}"
@@ -256,12 +284,12 @@ def main() -> int:
             )
         (output / "warmup-result.json").write_text(json.dumps(warmup, indent=2) + "\n", encoding="utf-8")
 
-        capture_command(output, "vmm-vmmap-before.txt", ["/usr/bin/vmmap", "-summary", str(helper_pid)])
         capture_command(
             output,
-            "vmm-threads-before.txt",
-            ["/bin/ps", "-M", "-p", str(helper_pid), "-o", "pid,tid,state,time,command"],
+            "vmm-vmmap-before.txt",
+            privileged_argv(["/usr/bin/vmmap", "-summary", str(helper_pid)]),
         )
+        capture_command(output, "vmm-threads-before.txt", thread_snapshot_argv(helper_pid))
 
         result_holder: dict[str, object] = {}
         error_holder: list[str] = []
@@ -285,6 +313,7 @@ def main() -> int:
         top_proc = start_top(helper_pid, args.sample_seconds, output)
         try:
             run_sample(helper_pid, args.sample_seconds, output)
+            capture_command(output, "vmm-threads-during.txt", thread_snapshot_argv(helper_pid))
         finally:
             finish_top(top_proc, args.sample_seconds + 10)
 
@@ -300,12 +329,12 @@ def main() -> int:
         (output / "profile-result.json").write_text(
             json.dumps(result_holder, indent=2) + "\n", encoding="utf-8"
         )
-        capture_command(output, "vmm-vmmap-after.txt", ["/usr/bin/vmmap", "-summary", str(helper_pid)])
         capture_command(
             output,
-            "vmm-threads-after.txt",
-            ["/bin/ps", "-M", "-p", str(helper_pid), "-o", "pid,tid,state,time,command"],
+            "vmm-vmmap-after.txt",
+            privileged_argv(["/usr/bin/vmmap", "-summary", str(helper_pid)]),
         )
+        capture_command(output, "vmm-threads-after.txt", thread_snapshot_argv(helper_pid))
     except Exception as error:
         failed = True
         bench.log(f"profile failed: {error}")

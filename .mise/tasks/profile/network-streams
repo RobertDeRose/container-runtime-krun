@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Profile sustained krun P8 guest-to-host throughput with macOS sample/top"
+#MISE description="Profile sustained krun P8 guest-to-host throughput with macOS sample/top (requests sudo)"
 #USAGE flag "--runtime <runtime>" help="Runtime to profile" default="container-runtime-krun"
 #USAGE flag "--network <network>" help="Apple Container network" default="default"
 #USAGE flag "--image <image>" help="Python image used for benchmark endpoint" default="python:3.13-alpine"

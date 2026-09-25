@@ -14,6 +14,20 @@ sys.modules[SPEC.name] = profile
 SPEC.loader.exec_module(profile)
 
 
+class ProfilerCommandTests(unittest.TestCase):
+    def test_privileged_argv_uses_noninteractive_sudo_after_authorization(self):
+        self.assertEqual(
+            profile.privileged_argv(["/usr/bin/sample", "123", "20"]),
+            ["/usr/bin/sudo", "-n", "--", "/usr/bin/sample", "123", "20"],
+        )
+
+    def test_thread_snapshot_argv_uses_supported_macos_ps_fields(self):
+        argv = profile.thread_snapshot_argv(123)
+        self.assertEqual(argv[:4], ["/bin/ps", "-M", "-p", "123"])
+        self.assertNotIn("tid", " ".join(argv))
+        self.assertIn("%cpu", argv[-1])
+
+
 class ProcessDiscoveryTests(unittest.TestCase):
     def test_helper_pids_extracts_only_vmm_helpers(self):
         listing = """
