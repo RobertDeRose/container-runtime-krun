@@ -19,9 +19,19 @@ class ProcessDiscoveryTests(unittest.TestCase):
         listing = """
   11 1 501 0.0 0.1 1 2 S 00:01 /usr/bin/other
   22 1 501 7.5 1.0 3 4 R 00:02 /Library/x/container-krun-vmm-helper /tmp/a.json
+  23 22 0 0.0 0.1 3 4 S 00:02 /usr/bin/sudo -n -- /Library/x/container-krun-vmm-helper /tmp/a.json
   33 1 501 1.0 0.2 5 6 S 00:03 container-runtime-krun
 """
         self.assertEqual(list(profile.helper_pids(listing)), [22])
+
+
+    def test_helper_pids_ignores_sudo_wrapper(self):
+        listing = """
+  11262 11252 0 0.0 0.1 10416 488792128 S 00:03 /usr/bin/sudo -n -- /Library/x/container-krun-vmm-helper /tmp/container-id/config.json
+  11300 11262 502 17.4 2.2 366848 490025904 S 00:02 /Library/x/container-krun-vmm-helper /tmp/container-id/config.json
+"""
+        self.assertEqual(list(profile.helper_pids(listing)), [11300])
+        self.assertEqual(profile.find_new_helper(set(), listing, "container-id"), 11300)
 
     def test_find_new_helper_prefers_new_process(self):
         listing = """

@@ -40,15 +40,23 @@ def process_listing() -> str:
 def helper_pids(listing: str) -> dict[int, str]:
     found: dict[int, str] = {}
     for line in listing.splitlines():
-        if HELPER_NAME not in line:
-            continue
         fields = line.strip().split(None, 9)
-        if not fields:
+        if len(fields) < 10:
             continue
         try:
             pid = int(fields[0])
         except ValueError:
             continue
+
+        # The runtime launches the VMM through ``sudo -n -- helper ...``.  The
+        # sudo wrapper's command line therefore contains HELPER_NAME as well,
+        # but sampling it would profile sudo rather than the VMM.  Only accept
+        # rows whose actual executable is the helper itself.
+        command = fields[9]
+        executable = command.split(None, 1)[0]
+        if Path(executable).name != HELPER_NAME:
+            continue
+
         found[pid] = line
     return found
 
