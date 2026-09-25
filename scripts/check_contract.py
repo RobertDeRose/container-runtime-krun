@@ -49,6 +49,36 @@ for required in (
     if required not in benchmark_task_text:
         print(f"benchmark:runtimes mise usage contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
+network_stream_task = ROOT / ".mise/tasks/benchmark/network-streams"
+if not network_stream_task.is_file():
+    print("benchmark:network-streams must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+network_stream_task_text = network_stream_task.read_text()
+for required in (
+    '#USAGE flag "--streams <streams>"',
+    'default="1,4,8"',
+    '#USAGE flag "--seconds <seconds>"',
+    '#USAGE flag "--iterations <iterations>"',
+    'default="4"',
+    'exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/benchmark_network_streams.py"',
+):
+    if required not in network_stream_task_text:
+        print(f"benchmark:network-streams mise usage contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+network_stream_script = (ROOT / "scripts/benchmark_network_streams.py").read_text()
+for required in (
+    '"guest_to_host"',
+    '"host_to_guest"',
+    'endpoint.guest_ip',
+    'SinkServer(endpoint.gateway)',
+    'threading.Barrier(streams + 1',
+    'runtime_b_over_a',
+):
+    if required not in network_stream_script:
+        print(f"sustained network benchmark contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 vmnet_batch_task = ROOT / ".mise/tasks/validate/vmnet-batching"
 if not vmnet_batch_task.is_file():
     print("validate:vmnet-batching must be a mise file task", file=sys.stderr)
