@@ -238,7 +238,6 @@ else
   exit 1
 fi
 
-BENCHMARK_OK=1
 if capture paired-network-benchmark \
     python3 scripts/benchmark_network_metrics.py \
       --samples "$SAMPLES" \
@@ -258,14 +257,15 @@ if capture paired-network-benchmark \
   pass "paired network behavioral/performance samples"
 else
   fail "paired network behavioral/performance samples"
-  BENCHMARK_OK=0
+  exit 1
 fi
 
 if summarize_samples; then
   pass "bulk network sample completeness"
 else
   fail "bulk network sample completeness"
+  exit 1
 fi
 
 finish
-exit "$([[ "$FAILURES" -eq 0 && "$BENCHMARK_OK" -eq 1 ]] && echo 0 || echo 1)"
+exit "$([[ "$FAILURES" -eq 0 ]] && echo 0 || echo 1)"
