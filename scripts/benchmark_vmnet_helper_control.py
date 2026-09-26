@@ -13,11 +13,15 @@ import statistics
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import yaml
 
 import benchmark_network_streams as streams_bench
 
@@ -196,6 +200,85 @@ def wait_for_ssh(vm_name: str, config: Path, timeout: int) -> None:
     raise RuntimeError(f"timeout waiting for control VM SSH: {last}")
 
 
+def create_cidata_iso(vm: object, cidata_module: object, timeout: int) -> str:
+    """Create the vmnet-helper cloud-init seed with macOS built-in hdiutil."""
+    cidata = Path(cidata_module.store.vm_path(vm.vm_name, "cidata.iso"))
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp)
+        (source / "meta-data").write_text(
+            yaml.dump(cidata_module.create_meta_data(vm), sort_keys=False),
+            encoding="utf-8",
+        )
+        (source / "user-data").write_text(
+            "#cloud-config\n"
+            + yaml.dump(cidata_module.create_user_data(vm), sort_keys=False),
+            encoding="utf-8",
+        )
+        (source / "network-config").write_text(
+            yaml.dump(cidata_module.create_network_config(vm), sort_keys=False),
+            encoding="utf-8",
+        )
+        if cidata.exists():
+            cidata.unlink()
+        run(
+            [
+                "hdiutil",
+                "makehybrid",
+                "-quiet",
+                "-iso",
+                "-joliet",
+                "-default-volume-name",
+                "cidata",
+                "-o",
+                str(cidata),
+                str(source),
+            ],
+            timeout=timeout,
+        )
+    return str(cidata)
+
+
+def prepare_control_disk(vm: object, disks_module: object, timeout: int) -> dict[str, str]:
+    """Prepare a writable QCOW2 root disk without requiring qemu-img."""
+    image = disks_module.IMAGES[vm.distro][platform.machine()]["image"]
+    image_hash = hashlib.sha256(image.encode()).hexdigest()
+    cache_dir = Path(disks_module.store.ensure_cache_dir("images", image_hash))
+    cached = cache_dir / "control.qcow2"
+    if not cached.is_file():
+        tmp = cached.with_suffix(".tmp")
+        print(f"[vmnet-helper-control] downloading {image}", flush=True)
+        try:
+            with urllib.request.urlopen(image, timeout=timeout) as response, tmp.open("wb") as stream:
+                shutil.copyfileobj(response, stream, length=1024 * 1024)
+            tmp.replace(cached)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+    target = Path(disks_module.store.vm_path(vm.vm_name, "disk.qcow2"))
+    if not target.is_file():
+        clone = subprocess.run(
+            ["/bin/cp", "-c", str(cached), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if clone.returncode != 0:
+            shutil.copyfile(cached, target)
+    return {"image": str(target)}
+
+
+def mark_root_disk_qcow2(argv: list[str]) -> list[str]:
+    """Tell krunkit that the first virtio-blk device is the QCOW2 root disk."""
+    command = list(argv)
+    prefix = "--device=virtio-blk,path="
+    for index, argument in enumerate(command):
+        if argument.startswith(prefix):
+            command[index] = argument + ",format=qcow2"
+            return command
+    raise RuntimeError("krunkit control command has no virtio-blk root disk")
+
+
 def tcp_sample(
     vm_name: str,
     config: Path,
@@ -245,7 +328,7 @@ def main() -> int:
         parser.error("durations, iterations, cpus, memory, and timeout must be positive")
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("the vmnet-helper control requires Apple Silicon macOS")
-    for command in ("git", "make", "cargo", "ssh", "mkisofs", "bsdtar", "otool"):
+    for command in ("git", "make", "cargo", "ssh", "hdiutil", "otool"):
         if shutil.which(command) is None:
             parser.error(f"required command not found: {command}")
     if not list((Path.home() / ".ssh").glob("id_*.pub")):
@@ -263,9 +346,15 @@ def main() -> int:
 
     sys.path.insert(0, str(helper_checkout))
     import testing  # type: ignore[import-not-found]
+    import testing.cidata as cidata_module  # type: ignore[import-not-found]
+    import testing.disks as disks_module  # type: ignore[import-not-found]
     import testing.helper as helper_module  # type: ignore[import-not-found]
 
     helper_module.HELPER = str(helper_binary)
+    cidata_module.create_iso = lambda vm: create_cidata_iso(vm, cidata_module, args.timeout)
+    disks_module.create_disk = lambda vm: prepare_control_disk(vm, disks_module, args.timeout)
+    original_krunkit_command = testing.VM.krunkit_command
+    testing.VM.krunkit_command = lambda vm: mark_root_disk_qcow2(original_krunkit_command(vm))
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     token = f"{stamp}-{os.getpid()}"
