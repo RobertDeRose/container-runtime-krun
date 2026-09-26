@@ -143,32 +143,45 @@ class VmnetHelperControlTests(unittest.TestCase):
         self.assertIn('os.environ["DYLD_LIBRARY_PATH"]', source)
         self.assertIn('str(control_prefix / "lib")', source)
 
-    def test_wait_for_ssh_retries_probe_timeout(self):
+    def test_wait_for_ssh_retries_until_ipv4_is_reachable(self):
         vm = mock.Mock()
         vm.vm_name = "control"
-        success = mock.Mock(returncode=0, stdout="", stderr="")
-        timeout = MODULE.subprocess.TimeoutExpired(["ssh"], 5)
+        vm.fqdn.return_value = "control-vmnet-helper.local"
+        connection = mock.MagicMock()
 
         with mock.patch.object(
-            MODULE.subprocess, "run", side_effect=[timeout, success]
-        ) as run, mock.patch.object(MODULE.time, "sleep"):
-            MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
+            MODULE.socket,
+            "gethostbyname",
+            side_effect=[MODULE.socket.gaierror("not ready"), "192.168.64.2"],
+        ) as resolve, mock.patch.object(
+            MODULE.socket, "create_connection", return_value=connection
+        ) as connect, mock.patch.object(MODULE.time, "sleep"):
+            address = MODULE.wait_for_ssh(vm, 30)
 
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(address, "192.168.64.2")
+        self.assertEqual(resolve.call_count, 2)
+        connect.assert_called_once_with(("192.168.64.2", 22), timeout=2)
         vm.check_running.assert_called_once_with()
 
-    def test_wait_for_ssh_checks_vm_after_failed_probe(self):
-        vm = mock.Mock()
-        vm.vm_name = "control"
-        failed = mock.Mock(returncode=255, stdout="", stderr="not ready")
-        success = mock.Mock(returncode=0, stdout="", stderr="")
-
+    def test_ssh_pins_control_ipv4(self):
         with mock.patch.object(
-            MODULE.subprocess, "run", side_effect=[failed, success]
-        ), mock.patch.object(MODULE.time, "sleep"):
-            MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
+            MODULE, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")
+        ) as run:
+            MODULE.ssh("control", Path("ssh.config"), "192.168.64.2", ["true"], 30)
 
-        vm.check_running.assert_called_once_with()
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "ssh",
+                "-4",
+                "-F",
+                "ssh.config",
+                "-o",
+                "HostName=192.168.64.2",
+                "control",
+                "true",
+            ],
+        )
 
     def test_patch_krunkit_headless_removes_default_gpu_setup(self):
         import tempfile
@@ -201,13 +214,13 @@ class VmnetHelperControlTests(unittest.TestCase):
             vm = mock.Mock()
             vm.vm_name = "control"
             vm.check_running.side_effect = RuntimeError("Virtual machine terminated (exitcode -6)")
-            failed = mock.Mock(returncode=255, stdout="", stderr="not ready")
-
             with mock.patch.object(MODULE.Path, "home", return_value=home), mock.patch.object(
-                MODULE.subprocess, "run", return_value=failed
+                MODULE.socket, "gethostbyname", return_value="192.168.64.2"
+            ), mock.patch.object(
+                MODULE.socket, "create_connection", side_effect=OSError("not ready")
             ), mock.patch.object(MODULE.time, "sleep"):
                 with self.assertRaisesRegex(RuntimeError, "fatal control failure") as caught:
-                    MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
+                    MODULE.wait_for_ssh(vm, 30)
 
             self.assertIn("krunkit --device test", str(caught.exception))
             self.assertIn("exitcode -6", str(caught.exception))

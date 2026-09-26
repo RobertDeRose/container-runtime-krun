@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -276,29 +277,38 @@ def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> P
     return binary
 
 
-def ssh(vm_name: str, config: Path, argv: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-    return run(["ssh", "-F", str(config), vm_name, *argv], timeout=timeout)
+def ssh(
+    vm_name: str,
+    config: Path,
+    address: str,
+    argv: list[str],
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        "ssh",
+        "-4",
+        "-F",
+        str(config),
+        "-o",
+        f"HostName={address}",
+        vm_name,
+        *argv,
+    ]
+    return run(command, timeout=timeout)
 
 
-def wait_for_ssh(vm: object, config: Path, timeout: int) -> None:
-    vm_name = str(vm.vm_name)
+def wait_for_ssh(vm: object, timeout: int) -> str:
+    """Wait for the control VM over IPv4 and return its numeric address."""
+    fqdn = str(vm.fqdn())
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
         try:
-            result = subprocess.run(
-                ["ssh", "-F", str(config), "-o", "ConnectTimeout=2", vm_name, "true"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            last = f"SSH readiness probe timed out after {exc.timeout} seconds"
-        else:
-            if result.returncode == 0:
-                return
-            last = result.stdout + result.stderr
+            address = socket.gethostbyname(fqdn)
+            with socket.create_connection((address, 22), timeout=2):
+                return address
+        except OSError as error:
+            last = f"{fqdn}: {error}"
 
         try:
             vm.check_running()
@@ -308,7 +318,10 @@ def wait_for_ssh(vm: object, config: Path, timeout: int) -> None:
                 raise RuntimeError(f"{error}\n{details}") from error
             raise
         time.sleep(1)
-    raise RuntimeError(f"timeout waiting for control VM SSH: {last}")
+
+    details = vm_failure_details(vm)
+    suffix = f"\n{details}" if details else ""
+    raise RuntimeError(f"timeout waiting for control VM IPv4 SSH: {last}{suffix}")
 
 
 def create_cidata_iso(vm: object, cidata_module: object, timeout: int) -> str:
@@ -393,6 +406,7 @@ def mark_root_disk_qcow2(argv: list[str]) -> list[str]:
 def tcp_sample(
     vm_name: str,
     config: Path,
+    address: str,
     gateway: str,
     streams: int,
     seconds: int,
@@ -402,6 +416,7 @@ def tcp_sample(
         result = ssh(
             vm_name,
             config,
+            address,
             [
                 "python3",
                 "-c",
@@ -532,10 +547,11 @@ def main() -> int:
             else:
                 os.environ["DYLD_LIBRARY_PATH"] = old_dyld_library_path
         ssh_config = Path.home() / ".vmnet-helper/vms" / vm_name / "ssh.config"
-        wait_for_ssh(vm, ssh_config, args.timeout)
+        guest_ipv4 = wait_for_ssh(vm, args.timeout)
         ssh(
             vm_name,
             ssh_config,
+            guest_ipv4,
             [
                 "sh",
                 "-lc",
@@ -548,14 +564,22 @@ def main() -> int:
 
         for streams in args.streams:
             warmup = tcp_sample(
-                vm_name, ssh_config, gateway, streams, args.warmup_seconds, args.timeout
+                vm_name,
+                ssh_config,
+                guest_ipv4,
+                gateway,
+                streams,
+                args.warmup_seconds,
+                args.timeout,
             )
             print(
                 f"[vmnet-helper-control] warmup P{streams}: {warmup.mib_per_second:.1f} MiB/s",
                 flush=True,
             )
             for iteration in range(1, args.iterations + 1):
-                sample = tcp_sample(vm_name, ssh_config, gateway, streams, args.seconds, args.timeout)
+                sample = tcp_sample(
+                    vm_name, ssh_config, guest_ipv4, gateway, streams, args.seconds, args.timeout
+                )
                 sample = Sample(
                     streams=sample.streams,
                     iteration=iteration,
@@ -581,6 +605,7 @@ def main() -> int:
             "iterations": args.iterations,
             "cpus": args.cpus,
             "memory_mib": args.memory,
+            "guest_ipv4": guest_ipv4,
             "repository_head": git_head(root),
             "libkrun_head": git_head(root / ".build-deps/libkrun"),
             "libkrun_sha256": sha256(root / ".build-deps/libkrun/target/release" / LIBKRUN_DYLIB),
