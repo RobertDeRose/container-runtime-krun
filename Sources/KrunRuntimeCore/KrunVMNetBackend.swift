@@ -138,7 +138,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
           metadata: [
             "network_index": "\(index)",
             "pid": "\(process.processIdentifier)",
-            "socket": socketPath,
+            "socket": "\(socketPath)",
           ]
         )
         return KrunVMNetBackend(
