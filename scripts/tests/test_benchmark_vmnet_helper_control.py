@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "benchmark_vmnet_helper_control.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("benchmark_vmnet_helper_control", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
@@ -31,6 +32,11 @@ class VmnetHelperControlTests(unittest.TestCase):
         self.assertEqual([row["streams"] for row in rows], [1, 4])
         self.assertEqual(rows[0]["median_mib_per_second"], 1.5)
         self.assertEqual(rows[1]["median_mib_per_second"], 10.0)
+
+    def test_control_does_not_require_host_iperf3(self):
+        source = MODULE_PATH.read_text()
+        self.assertNotIn('"iperf3"', source)
+        self.assertIn("streams_bench.GUEST_SOURCE", source)
 
 
 if __name__ == "__main__":

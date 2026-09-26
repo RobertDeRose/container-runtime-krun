@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Benchmark krunkit + vmnet-helper offload against the repository-managed libkrun"
-#USAGE flag "--streams <streams>" help="Comma-separated parallel iperf3 stream counts" default="1,4,8"
+#USAGE flag "--streams <streams>" help="Comma-separated parallel TCP stream counts" default="1,4,8"
 #USAGE flag "--seconds <seconds>" help="Sustained duration per recorded sample" default="20"
 #USAGE flag "--warmup-seconds <seconds>" help="Warmup duration per stream count" default="3"
 #USAGE flag "--iterations <iterations>" help="Recorded samples per stream count" default="6"

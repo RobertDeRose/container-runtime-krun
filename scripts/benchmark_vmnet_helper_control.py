@@ -9,7 +9,6 @@ import json
 import os
 import platform
 import shutil
-import socket
 import statistics
 import subprocess
 import sys
@@ -19,6 +18,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import benchmark_network_streams as streams_bench
 
 MIB = 1024 * 1024
 VMNET_HELPER_REPOSITORY = "https://github.com/nirs/vmnet-helper.git"
@@ -195,21 +196,37 @@ def wait_for_ssh(vm_name: str, config: Path, timeout: int) -> None:
     raise RuntimeError(f"timeout waiting for control VM SSH: {last}")
 
 
-def iperf_sample(address: str, streams: int, seconds: int, timeout: int) -> Sample:
-    result = run(
-        [
-            "iperf3", "--client", address, "--reverse", "--parallel", str(streams),
-            "--time", str(seconds), "--json",
-        ],
-        timeout=max(timeout, seconds + 30),
-    )
-    data = json.loads(result.stdout)
-    bits_per_second = float(data["end"]["sum_received"]["bits_per_second"])
+def tcp_sample(
+    vm_name: str,
+    config: Path,
+    gateway: str,
+    streams: int,
+    seconds: int,
+    timeout: int,
+) -> Sample:
+    with streams_bench.SinkServer(gateway) as sink:
+        result = ssh(
+            vm_name,
+            config,
+            [
+                "python3",
+                "-c",
+                streams_bench.GUEST_SOURCE,
+                gateway,
+                str(sink.port),
+                str(streams),
+                str(seconds),
+                str(256 * 1024),
+            ],
+            max(timeout, seconds + 30),
+        )
+    data = streams_bench.parse_json_line(result.stdout)
+    mib_per_second = float(data["mib_per_second"])
     return Sample(
         streams=streams,
         iteration=0,
-        bits_per_second=bits_per_second,
-        mib_per_second=bits_per_second / 8 / MIB,
+        bits_per_second=mib_per_second * MIB * 8,
+        mib_per_second=mib_per_second,
     )
 
 
@@ -228,7 +245,7 @@ def main() -> int:
         parser.error("durations, iterations, cpus, memory, and timeout must be positive")
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("the vmnet-helper control requires Apple Silicon macOS")
-    for command in ("git", "make", "cargo", "iperf3", "ssh", "mkisofs", "bsdtar", "otool"):
+    for command in ("git", "make", "cargo", "ssh", "mkisofs", "bsdtar", "otool"):
         if shutil.which(command) is None:
             parser.error(f"required command not found: {command}")
     if not list((Path.home() / ".ssh").glob("id_*.pub")):
@@ -307,23 +324,25 @@ def main() -> int:
             vm_name,
             ssh_config,
             [
-                "sh", "-lc",
-                "command -v iperf3 >/dev/null || "
-                "(sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3)",
+                "sh",
+                "-lc",
+                "command -v python3 >/dev/null || "
+                "(sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3)",
             ],
             args.timeout,
         )
-        ssh(vm_name, ssh_config, ["sh", "-lc", "pkill iperf3 >/dev/null 2>&1 || true; iperf3 -s -D"], args.timeout)
-        address = socket.gethostbyname(vm.fqdn())
+        gateway = str(helper.interface[testing.VMNET_START_ADDRESS])
 
         for streams in args.streams:
-            warmup = iperf_sample(address, streams, args.warmup_seconds, args.timeout)
+            warmup = tcp_sample(
+                vm_name, ssh_config, gateway, streams, args.warmup_seconds, args.timeout
+            )
             print(
                 f"[vmnet-helper-control] warmup P{streams}: {warmup.mib_per_second:.1f} MiB/s",
                 flush=True,
             )
             for iteration in range(1, args.iterations + 1):
-                sample = iperf_sample(address, streams, args.seconds, args.timeout)
+                sample = tcp_sample(vm_name, ssh_config, gateway, streams, args.seconds, args.timeout)
                 sample = Sample(
                     streams=sample.streams,
                     iteration=iteration,
@@ -340,6 +359,8 @@ def main() -> int:
         metadata = {
             "direction": "guest_to_host",
             "transport": "krunkit unixgram -> vmnet-helper -> vmnet_write",
+            "workload": "repository sustained TCP stream protocol",
+            "chunk_kib": 256,
             "offloading": "TSO + checksum",
             "streams": args.streams,
             "seconds": args.seconds,
