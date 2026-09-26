@@ -81,7 +81,7 @@ class VmnetHelperControlTests(unittest.TestCase):
             cargo = next(call for call in calls if call[0][:2] == ["cargo", "build"])
             self.assertEqual(cargo[0], ["cargo", "build", "--release"])
             self.assertEqual(cargo[1]["env"]["PREFIX"], str(prefix))
-            self.assertIn("@executable_path/../lib", cargo[1]["env"]["RUSTFLAGS"])
+            self.assertNotIn("RUSTFLAGS", cargo[1]["env"])
             self.assertEqual(binary.read_bytes(), b"krunkit")
             self.assertEqual((prefix / "share/krunkit/KRUN_EFI.silent.fd").read_bytes(), b"firmware")
             codesign = next(call for call in calls if call[0][0] == "codesign")
@@ -136,6 +136,12 @@ class VmnetHelperControlTests(unittest.TestCase):
         self.assertNotIn('["make", "install"', source)
         self.assertNotIn('"install_name_tool"', source)
 
+
+
+    def test_control_starts_krunkit_with_control_dylib_path(self):
+        source = MODULE_PATH.read_text()
+        self.assertIn('os.environ["DYLD_LIBRARY_PATH"]', source)
+        self.assertIn('str(control_prefix / "lib")', source)
 
     def test_wait_for_ssh_retries_probe_timeout(self):
         vm = mock.Mock()

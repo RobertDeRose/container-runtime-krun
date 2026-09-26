@@ -234,8 +234,6 @@ def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> P
             subprocess.run(["cargo", "clean"], cwd=checkout, check=False, stdout=subprocess.DEVNULL)
             env = os.environ.copy()
             env["PREFIX"] = str(prefix)
-            rpath = "-C link-arg=-Wl,-rpath,@executable_path/../lib"
-            env["RUSTFLAGS"] = " ".join(filter(None, [env.get("RUSTFLAGS", "").strip(), rpath]))
             run(["cargo", "build", "--release"], cwd=checkout, timeout=timeout, env=env)
         finally:
             context.write_text(original_context, encoding="utf-8")
@@ -258,9 +256,6 @@ def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> P
         shutil.copy2(source_firmware, firmware)
         binary.chmod(0o755)
 
-        load_commands = run(["otool", "-l", str(binary)], timeout=timeout).stdout
-        if "@executable_path/../lib" not in load_commands:
-            raise RuntimeError("krunkit control binary is missing its libkrun rpath")
         stamp.write_text(stamp_value, encoding="utf-8")
 
     entitlements = checkout / "krunkit.entitlements"
@@ -522,7 +517,20 @@ def main() -> int:
             helper.interface[testing.VMNET_MAC_ADDRESS],
             fd=vm_sock.fileno(),
         )
-        vm.start()
+        old_dyld_library_path = os.environ.get("DYLD_LIBRARY_PATH")
+        control_lib_dir = str(control_prefix / "lib")
+        os.environ["DYLD_LIBRARY_PATH"] = (
+            f"{control_lib_dir}:{old_dyld_library_path}"
+            if old_dyld_library_path
+            else control_lib_dir
+        )
+        try:
+            vm.start()
+        finally:
+            if old_dyld_library_path is None:
+                os.environ.pop("DYLD_LIBRARY_PATH", None)
+            else:
+                os.environ["DYLD_LIBRARY_PATH"] = old_dyld_library_path
         ssh_config = Path.home() / ".vmnet-helper/vms" / vm_name / "ssh.config"
         wait_for_ssh(vm, ssh_config, args.timeout)
         ssh(
