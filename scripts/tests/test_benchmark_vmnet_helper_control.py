@@ -143,25 +143,40 @@ class VmnetHelperControlTests(unittest.TestCase):
         self.assertIn('os.environ["DYLD_LIBRARY_PATH"]', source)
         self.assertIn('str(control_prefix / "lib")', source)
 
-    def test_wait_for_ssh_retries_until_ipv4_is_reachable(self):
+    def test_wait_for_ssh_retries_static_ipv4_until_reachable(self):
         vm = mock.Mock()
-        vm.vm_name = "control"
-        vm.fqdn.return_value = "control-vmnet-helper.local"
         connection = mock.MagicMock()
 
         with mock.patch.object(
             MODULE.socket,
-            "gethostbyname",
-            side_effect=[MODULE.socket.gaierror("not ready"), "192.168.64.2"],
-        ) as resolve, mock.patch.object(
-            MODULE.socket, "create_connection", return_value=connection
+            "create_connection",
+            side_effect=[OSError("not ready"), connection],
         ) as connect, mock.patch.object(MODULE.time, "sleep"):
-            address = MODULE.wait_for_ssh(vm, 30)
+            MODULE.wait_for_ssh(vm, "192.168.64.254", 30)
 
-        self.assertEqual(address, "192.168.64.2")
-        self.assertEqual(resolve.call_count, 2)
-        connect.assert_called_once_with(("192.168.64.2", 22), timeout=2)
+        self.assertEqual(connect.call_count, 2)
+        connect.assert_called_with(("192.168.64.254", 22), timeout=2)
         vm.check_running.assert_called_once_with()
+
+    def test_configure_static_guest_uses_helper_network(self):
+        args = mock.Mock(start_address=None, subnet_mask=None, ip_address=None)
+        testing = mock.Mock(
+            VMNET_START_ADDRESS="start",
+            VMNET_END_ADDRESS="end",
+            VMNET_SUBNET_MASK="mask",
+        )
+        interface = {
+            "start": "192.168.64.1",
+            "end": "192.168.64.254",
+            "mask": "255.255.255.0",
+        }
+
+        address = MODULE.configure_static_guest(args, interface, testing)
+
+        self.assertEqual(address, "192.168.64.254")
+        self.assertEqual(args.start_address, "192.168.64.1")
+        self.assertEqual(args.subnet_mask, "255.255.255.0")
+        self.assertEqual(args.ip_address, "192.168.64.254")
 
     def test_ssh_pins_control_ipv4(self):
         with mock.patch.object(
@@ -215,12 +230,10 @@ class VmnetHelperControlTests(unittest.TestCase):
             vm.vm_name = "control"
             vm.check_running.side_effect = RuntimeError("Virtual machine terminated (exitcode -6)")
             with mock.patch.object(MODULE.Path, "home", return_value=home), mock.patch.object(
-                MODULE.socket, "gethostbyname", return_value="192.168.64.2"
-            ), mock.patch.object(
                 MODULE.socket, "create_connection", side_effect=OSError("not ready")
             ), mock.patch.object(MODULE.time, "sleep"):
                 with self.assertRaisesRegex(RuntimeError, "fatal control failure") as caught:
-                    MODULE.wait_for_ssh(vm, 30)
+                    MODULE.wait_for_ssh(vm, "192.168.64.254", 30)
 
             self.assertIn("krunkit --device test", str(caught.exception))
             self.assertIn("exitcode -6", str(caught.exception))

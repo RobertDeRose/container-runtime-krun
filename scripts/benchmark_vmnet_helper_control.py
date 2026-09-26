@@ -297,18 +297,16 @@ def ssh(
     return run(command, timeout=timeout)
 
 
-def wait_for_ssh(vm: object, timeout: int) -> str:
-    """Wait for the control VM over IPv4 and return its numeric address."""
-    fqdn = str(vm.fqdn())
+def wait_for_ssh(vm: object, address: str, timeout: int) -> None:
+    """Wait for the control VM at its configured static IPv4 address."""
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
         try:
-            address = socket.gethostbyname(fqdn)
             with socket.create_connection((address, 22), timeout=2):
-                return address
+                return
         except OSError as error:
-            last = f"{fqdn}: {error}"
+            last = f"{address}: {error}"
 
         try:
             vm.check_running()
@@ -321,7 +319,25 @@ def wait_for_ssh(vm: object, timeout: int) -> str:
 
     details = vm_failure_details(vm)
     suffix = f"\n{details}" if details else ""
-    raise RuntimeError(f"timeout waiting for control VM IPv4 SSH: {last}{suffix}")
+    raise RuntimeError(f"timeout waiting for control VM static IPv4 SSH: {last}{suffix}")
+
+
+def configure_static_guest(vm_args: object, interface: dict[str, object], testing: object) -> str:
+    """Pin the single control guest to a known address on vmnet's selected subnet."""
+    gateway = str(interface[testing.VMNET_START_ADDRESS])
+    guest = str(interface[testing.VMNET_END_ADDRESS])
+    netmask = str(interface[testing.VMNET_SUBNET_MASK])
+    if guest == gateway:
+        raise RuntimeError("vmnet-helper returned no distinct guest address")
+
+    # The helper is already running, so these values affect only the guest's
+    # cloud-init network configuration. This benchmark starts exactly one VM,
+    # so using the pool end as a static address cannot collide with another
+    # control guest and removes DHCP/mDNS from the measured setup.
+    vm_args.start_address = gateway
+    vm_args.subnet_mask = netmask
+    vm_args.ip_address = guest
+    return guest
 
 
 def create_cidata_iso(vm: object, cidata_module: object, timeout: int) -> str:
@@ -527,6 +543,7 @@ def main() -> int:
         vm_sock, helper_sock = testing.socketpair(True)
         helper = testing.Helper(vm_args, fd=helper_sock.fileno(), logfile=str(helper_log))
         helper.start()
+        guest_ipv4 = configure_static_guest(vm_args, helper.interface, testing)
         vm = testing.VM(
             vm_args,
             helper.interface[testing.VMNET_MAC_ADDRESS],
@@ -547,7 +564,7 @@ def main() -> int:
             else:
                 os.environ["DYLD_LIBRARY_PATH"] = old_dyld_library_path
         ssh_config = Path.home() / ".vmnet-helper/vms" / vm_name / "ssh.config"
-        guest_ipv4 = wait_for_ssh(vm, args.timeout)
+        wait_for_ssh(vm, guest_ipv4, args.timeout)
         ssh(
             vm_name,
             ssh_config,
@@ -606,6 +623,8 @@ def main() -> int:
             "cpus": args.cpus,
             "memory_mib": args.memory,
             "guest_ipv4": guest_ipv4,
+            "gateway_ipv4": gateway,
+            "network_configuration": "static from vmnet-helper selected network",
             "repository_head": git_head(root),
             "libkrun_head": git_head(root / ".build-deps/libkrun"),
             "libkrun_sha256": sha256(root / ".build-deps/libkrun/target/release" / LIBKRUN_DYLIB),
