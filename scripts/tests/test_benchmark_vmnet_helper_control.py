@@ -87,6 +87,34 @@ class VmnetHelperControlTests(unittest.TestCase):
         self.assertNotIn('["make", "install"', source)
         self.assertNotIn('"install_name_tool"', source)
 
+
+    def test_wait_for_ssh_retries_probe_timeout(self):
+        vm = mock.Mock()
+        vm.vm_name = "control"
+        success = mock.Mock(returncode=0, stdout="", stderr="")
+        timeout = MODULE.subprocess.TimeoutExpired(["ssh"], 5)
+
+        with mock.patch.object(
+            MODULE.subprocess, "run", side_effect=[timeout, success]
+        ) as run, mock.patch.object(MODULE.time, "sleep"):
+            MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
+
+        self.assertEqual(run.call_count, 2)
+        vm.check_running.assert_called_once_with()
+
+    def test_wait_for_ssh_checks_vm_after_failed_probe(self):
+        vm = mock.Mock()
+        vm.vm_name = "control"
+        failed = mock.Mock(returncode=255, stdout="", stderr="not ready")
+        success = mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            MODULE.subprocess, "run", side_effect=[failed, success]
+        ), mock.patch.object(MODULE.time, "sleep"):
+            MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
+
+        vm.check_running.assert_called_once_with()
+
     def test_create_cidata_iso_uses_cidata_volume_label(self):
         class Store:
             @staticmethod

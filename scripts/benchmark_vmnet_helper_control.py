@@ -209,20 +209,27 @@ def ssh(vm_name: str, config: Path, argv: list[str], timeout: int) -> subprocess
     return run(["ssh", "-F", str(config), vm_name, *argv], timeout=timeout)
 
 
-def wait_for_ssh(vm_name: str, config: Path, timeout: int) -> None:
+def wait_for_ssh(vm: object, config: Path, timeout: int) -> None:
+    vm_name = str(vm.vm_name)
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
-        result = subprocess.run(
-            ["ssh", "-F", str(config), "-o", "ConnectTimeout=2", vm_name, "true"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        last = result.stdout + result.stderr
+        try:
+            result = subprocess.run(
+                ["ssh", "-F", str(config), "-o", "ConnectTimeout=2", vm_name, "true"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last = f"SSH readiness probe timed out after {exc.timeout} seconds"
+        else:
+            if result.returncode == 0:
+                return
+            last = result.stdout + result.stderr
+
+        vm.check_running()
         time.sleep(1)
     raise RuntimeError(f"timeout waiting for control VM SSH: {last}")
 
@@ -435,7 +442,7 @@ def main() -> int:
         )
         vm.start()
         ssh_config = Path.home() / ".vmnet-helper/vms" / vm_name / "ssh.config"
-        wait_for_ssh(vm_name, ssh_config, args.timeout)
+        wait_for_ssh(vm, ssh_config, args.timeout)
         ssh(
             vm_name,
             ssh_config,
