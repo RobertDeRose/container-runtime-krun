@@ -202,6 +202,22 @@ def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> P
         if "@executable_path/../lib" not in load_commands:
             raise RuntimeError("krunkit control binary is missing its libkrun rpath")
         stamp.write_text(stamp_value, encoding="utf-8")
+
+    entitlements = checkout / "krunkit.entitlements"
+    if not entitlements.is_file():
+        raise RuntimeError(f"missing krunkit entitlements: {entitlements}")
+    run(
+        [
+            "codesign",
+            "--entitlements",
+            str(entitlements),
+            "--force",
+            "-s",
+            "-",
+            str(binary),
+        ],
+        timeout=timeout,
+    )
     return binary
 
 
@@ -362,7 +378,7 @@ def main() -> int:
         parser.error("durations, iterations, cpus, memory, and timeout must be positive")
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("the vmnet-helper control requires Apple Silicon macOS")
-    for command in ("git", "cargo", "ssh", "hdiutil", "otool"):
+    for command in ("git", "cargo", "ssh", "hdiutil", "otool", "codesign"):
         if shutil.which(command) is None:
             parser.error(f"required command not found: {command}")
     if not list((Path.home() / ".ssh").glob("id_*.pub")):

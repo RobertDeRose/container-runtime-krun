@@ -62,6 +62,7 @@ class VmnetHelperControlTests(unittest.TestCase):
             source_binary = checkout / "target/release/krunkit"
             source_binary.write_bytes(b"krunkit")
             (checkout / "edk2/KRUN_EFI.silent.fd").write_bytes(b"firmware")
+            (checkout / "krunkit.entitlements").write_text("<plist/>")
 
             calls = []
 
@@ -81,6 +82,52 @@ class VmnetHelperControlTests(unittest.TestCase):
             self.assertIn("@executable_path/../lib", cargo[1]["env"]["RUSTFLAGS"])
             self.assertEqual(binary.read_bytes(), b"krunkit")
             self.assertEqual((prefix / "share/krunkit/KRUN_EFI.silent.fd").read_bytes(), b"firmware")
+            codesign = next(call for call in calls if call[0][0] == "codesign")
+            self.assertEqual(
+                codesign[0],
+                [
+                    "codesign",
+                    "--entitlements",
+                    str(checkout / "krunkit.entitlements"),
+                    "--force",
+                    "-s",
+                    "-",
+                    str(binary),
+                ],
+            )
+
+
+    def test_prepare_krunkit_resigns_cached_binary(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runtime"
+            checkout = Path(tmp) / "krunkit"
+            prefix = Path(tmp) / "prefix"
+            libkrun = root / ".build-deps/libkrun/target/release" / MODULE.LIBKRUN_DYLIB
+            libkrun.parent.mkdir(parents=True)
+            libkrun.write_bytes(b"libkrun")
+            (checkout / "krunkit.entitlements").parent.mkdir(parents=True)
+            (checkout / "krunkit.entitlements").write_text("<plist/>")
+            binary = prefix / "bin/krunkit"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"cached")
+            (prefix / ".krunkit-control-stamp").write_text(
+                f"{MODULE.KRUNKIT_COMMIT} {MODULE.sha256(libkrun)}\n"
+            )
+
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(MODULE, "run", side_effect=fake_run):
+                result = MODULE.prepare_krunkit(root, checkout, prefix, 30)
+
+            self.assertEqual(result, binary)
+            self.assertFalse(any(argv[:2] == ["cargo", "build"] for argv in calls))
+            self.assertTrue(any(argv[0] == "codesign" for argv in calls))
 
     def test_control_does_not_invoke_krunkit_make_install(self):
         source = MODULE_PATH.read_text()
