@@ -445,8 +445,10 @@ def wait_ready(bench: Benchmark, container_id: str) -> None:
     raise RuntimeError(f"{container_id}: guest sink did not become ready")
 
 
-def start_endpoint(bench: Benchmark, runtime: str, image: str, network: str, prefix: str) -> Endpoint:
-    key = "".join(ch if ch.isalnum() else "-" for ch in runtime)
+def start_endpoint(
+    bench: Benchmark, runtime: str, label: str, image: str, network: str, prefix: str
+) -> Endpoint:
+    key = "".join(ch if ch.isalnum() else "-" for ch in label)
     container_id = f"{prefix}-{key}"
     published_port = free_tcp_port()
     bench.active_containers.add(container_id)
@@ -461,8 +463,23 @@ def start_endpoint(bench: Benchmark, runtime: str, image: str, network: str, pre
     )
     wait_ready(bench, container_id)
     guest_ip, gateway = inspect_endpoint(bench, container_id)
-    return Endpoint(runtime, container_id, guest_ip, gateway, published_port)
+    return Endpoint(label, container_id, guest_ip, gateway, published_port)
 
+
+
+def configure_runtime_backend(marker: Path | None, backend: str) -> None:
+    if backend == "default":
+        return
+    if marker is None:
+        raise RuntimeError(f"backend {backend} requires --control-marker")
+    if backend == "native":
+        marker.unlink(missing_ok=True)
+        return
+    if backend == "vmnet-helper":
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("vmnet-helper-control-v1\n", encoding="utf-8")
+        return
+    raise ValueError(f"unsupported runtime backend {backend}")
 
 def guest_source(
     bench: Benchmark,
@@ -705,6 +722,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-a", default="container-runtime-linux")
     parser.add_argument("--runtime-b", default="container-runtime-krun")
+    parser.add_argument("--runtime-a-label")
+    parser.add_argument("--runtime-b-label")
+    parser.add_argument(
+        "--runtime-a-backend", choices=("default", "native", "vmnet-helper"), default="default"
+    )
+    parser.add_argument(
+        "--runtime-b-backend", choices=("default", "native", "vmnet-helper"), default="default"
+    )
+    parser.add_argument("--control-marker", type=Path)
     parser.add_argument("--network", default="default")
     parser.add_argument("--image", default="python:3.13-alpine")
     parser.add_argument("--streams", type=parse_streams, default=parse_streams("1,4,8"))
@@ -719,6 +745,13 @@ def main() -> int:
     if args.seconds <= 0 or args.warmup_seconds <= 0 or args.iterations <= 0 or args.chunk_kib <= 0:
         parser.error("seconds, warmup-seconds, iterations, and chunk-kib must be positive")
 
+    runtime_a_label = args.runtime_a_label or args.runtime_a
+    runtime_b_label = args.runtime_b_label or args.runtime_b
+    if runtime_a_label == runtime_b_label:
+        parser.error("runtime labels must be distinct")
+    if (args.runtime_a_backend != "default" or args.runtime_b_backend != "default") and args.control_marker is None:
+        parser.error("non-default runtime backends require --control-marker")
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     token = f"{stamp}-{os.getpid()}"
     output = args.result_root / f"network-streams-{token}"
@@ -730,7 +763,12 @@ def main() -> int:
 
     (output / "metadata.json").write_text(json.dumps({
         "runtime_a": args.runtime_a,
+        "runtime_a_label": runtime_a_label,
+        "runtime_a_backend": args.runtime_a_backend,
         "runtime_b": args.runtime_b,
+        "runtime_b_label": runtime_b_label,
+        "runtime_b_backend": args.runtime_b_backend,
+        "control_marker": str(args.control_marker) if args.control_marker else None,
         "network": args.network,
         "image": args.image,
         "streams": args.streams,
@@ -748,8 +786,15 @@ def main() -> int:
     }, indent=2) + "\n", encoding="utf-8")
 
     try:
-        for runtime in (args.runtime_a, args.runtime_b):
-            endpoints.append(start_endpoint(bench, runtime, args.image, args.network, prefix))
+        runtime_specs = (
+            (args.runtime_a, runtime_a_label, args.runtime_a_backend),
+            (args.runtime_b, runtime_b_label, args.runtime_b_backend),
+        )
+        for runtime, label, backend in runtime_specs:
+            configure_runtime_backend(args.control_marker, backend)
+            endpoints.append(start_endpoint(bench, runtime, label, args.image, args.network, prefix))
+        if args.control_marker is not None:
+            args.control_marker.unlink(missing_ok=True)
 
         for streams in args.streams:
             run_direction(
@@ -766,7 +811,9 @@ def main() -> int:
         (output / "fatal-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
     finally:
         bench.cleanup()
-        write_results(bench, args.runtime_a, args.runtime_b)
+        if args.control_marker is not None:
+            args.control_marker.unlink(missing_ok=True)
+        write_results(bench, runtime_a_label, runtime_b_label)
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(output, arcname=output.name)
 

@@ -26,6 +26,21 @@ class StreamParsingTests(unittest.TestCase):
                     network_streams.parse_streams(value)
 
 
+class BackendSelectionTests(unittest.TestCase):
+    def test_configure_runtime_backend_toggles_marker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker = pathlib.Path(temp_dir) / ".vmnet-helper-control"
+            network_streams.configure_runtime_backend(marker, "vmnet-helper")
+            self.assertEqual(marker.read_text(), "vmnet-helper-control-v1\n")
+            network_streams.configure_runtime_backend(marker, "native")
+            self.assertFalse(marker.exists())
+
+    def test_non_default_backend_requires_marker(self):
+        with self.assertRaises(RuntimeError):
+            network_streams.configure_runtime_backend(None, "vmnet-helper")
+
+
+
 class SummaryTests(unittest.TestCase):
     def test_summary_groups_runtime_direction_and_parallelism(self):
         samples = [

@@ -75,22 +75,33 @@ public enum KrunNetworkFeatures {
     (1 << 0) | (1 << 1) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12)
 }
 
+public enum KrunNetworkBackend: String, Codable, Sendable, Equatable {
+  case nativeVMNetShared
+  case unixgram
+}
+
 public struct KrunNetworkConfig: Codable, Sendable, Equatable {
+  public let backend: KrunNetworkBackend
   public let ipv4Gateway: String
   public let ipv4Mask: String
+  public let socketPath: String?
   public let macAddress: [UInt8]
   public let features: UInt32
   public let flags: UInt32
 
   public init(
+    backend: KrunNetworkBackend = .nativeVMNetShared,
     ipv4Gateway: String,
     ipv4Mask: String,
+    socketPath: String? = nil,
     macAddress: [UInt8],
     features: UInt32 = 0,
     flags: UInt32 = 0
   ) {
+    self.backend = backend
     self.ipv4Gateway = ipv4Gateway
     self.ipv4Mask = ipv4Mask
+    self.socketPath = socketPath
     self.macAddress = macAddress
     self.features = features
     self.flags = flags

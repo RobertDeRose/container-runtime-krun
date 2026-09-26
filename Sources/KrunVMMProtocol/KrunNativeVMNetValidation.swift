@@ -9,6 +9,9 @@ extension KrunNetworkConfig {
   /// validates the IPv4 subnet and accepts only the bounded software-TX
   /// feature set, never a partial feature combination.
   public func validateNativeVMNet() throws {
+    guard backend == .nativeVMNetShared, socketPath == nil else {
+      throw KrunNativeVMNetError(description: "native vmnet requires the native shared backend")
+    }
     guard macAddress.count == 6, macAddress != [UInt8](repeating: 0, count: 6),
       macAddress[0] & 1 == 0
     else {

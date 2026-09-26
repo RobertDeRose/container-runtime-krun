@@ -50,8 +50,25 @@ import Testing
     ipv4Mask: "255.255.255.0",
     macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
   )
+  #expect(network.backend == .nativeVMNetShared)
+  #expect(network.socketPath == nil)
   #expect(network.features == 0)
   #expect(network.flags == 0)
+}
+
+@Test func unixgramNetworkConfigRoundTrips() throws {
+  let network = KrunNetworkConfig(
+    backend: .unixgram,
+    ipv4Gateway: "192.168.200.1",
+    ipv4Mask: "255.255.255.0",
+    socketPath: "/tmp/vmnet-helper.sock",
+    macAddress: [2, 0, 0, 0, 0, 2],
+    features: KrunNetworkFeatures.nativeVMNetTCPOffload
+  )
+  let decoded = try JSONDecoder().decode(
+    KrunNetworkConfig.self, from: JSONEncoder().encode(network)
+  )
+  #expect(decoded == network)
 }
 
 @Test func defaultsReserveControlAndStdioSeparately() {
@@ -81,6 +98,17 @@ import Testing
   let data = try JSONEncoder().encode(network)
   let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
   #expect(json["socketPath"] == nil)
+}
+
+@Test func nativeVMNetRejectsUnixgramBackend() {
+  let network = KrunNetworkConfig(
+    backend: .unixgram,
+    ipv4Gateway: "192.168.200.1",
+    ipv4Mask: "255.255.255.0",
+    socketPath: "/tmp/vmnet-helper.sock",
+    macAddress: [2, 0, 0, 0, 0, 1]
+  )
+  #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
 }
 
 @Test func nativeVMNetRejectsInvalidMACAndPartialOffloads() {

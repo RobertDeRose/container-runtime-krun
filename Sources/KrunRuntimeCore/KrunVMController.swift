@@ -91,9 +91,10 @@ public final class KrunVMController: @unchecked Sendable {
           message: "network config and attachment counts do not match"
         )
       }
-      let nativeVMNet = !networkConfigs.isEmpty
-      let selectedHelper = nativeVMNet ? KrunDefaults.nativeHelperPath : helperPath
-      let selectedLibkrun = nativeVMNet ? KrunDefaults.nativeLibkrunPath : libkrunPath
+      let managedNetwork = !networkConfigs.isEmpty
+      let nativeVMNet = networkConfigs.contains { $0.backend == .nativeVMNetShared }
+      let selectedHelper = managedNetwork ? KrunDefaults.nativeHelperPath : helperPath
+      let selectedLibkrun = managedNetwork ? KrunDefaults.nativeLibkrunPath : libkrunPath
       if nativeVMNet {
         guard getuid() != 0 else {
           throw ContainerizationError(.unsupported, message: "run Apple Container as an unprivileged user")
@@ -126,7 +127,7 @@ public final class KrunVMController: @unchecked Sendable {
 
       guard FileManager.default.isReadableFile(atPath: selectedHelper) else {
         throw ContainerizationError(
-          .notFound, message: "libkrun helper is not readable at \(selectedHelper); run mise run native:install for native vmnet")
+          .notFound, message: "libkrun helper is not readable at \(selectedHelper); run mise run native:install")
       }
       guard FileManager.default.isReadableFile(atPath: selectedLibkrun) else {
         throw ContainerizationError(.notFound, message: "libkrun is not readable at \(selectedLibkrun)")

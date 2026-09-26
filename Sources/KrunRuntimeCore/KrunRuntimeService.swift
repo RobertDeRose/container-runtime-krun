@@ -36,6 +36,7 @@ public actor KrunRuntimeService {
   private let connection: xpc_connection_t
   private let log: Logger
   private let helperPath: String
+  private let networkBackendMode: KrunNetworkBackendMode
 
   private var state: State = .created
   private var vm: KrunVMController?
@@ -46,6 +47,7 @@ public actor KrunRuntimeService {
   private var stopWaiters: [CheckedContinuation<Void, Never>] = []
   private var networkSessions: [XPCClientSession] = []
   private var networkAttachments: [Attachment] = []
+  private var networkBackends: [KrunVMNetBackend] = []
   private var socketForwarders: [SocketForwarderResult] = []
   private var lifecycleStartedAt: ContinuousClock.Instant?
 
@@ -53,11 +55,13 @@ public actor KrunRuntimeService {
     root: URL,
     connection: xpc_connection_t,
     helperPath: String,
+    networkBackendMode: KrunNetworkBackendMode = .nativeVMNet,
     log: Logger
   ) {
     self.root = root
     self.connection = connection
     self.helperPath = helperPath
+    self.networkBackendMode = networkBackendMode
     self.log = log
   }
 
@@ -89,6 +93,7 @@ public actor KrunRuntimeService {
     let networkResources = try await prepareNetworking(
       config: containerConfig,
       networkInfos: networkInfos,
+      bundle: bundle,
       startedAt: startedAt
     )
     let controller: KrunVMController
@@ -96,13 +101,14 @@ public actor KrunRuntimeService {
       controller = try await KrunVMController.boot(
         bundle: bundle,
         helperPath: helperPath,
-        networkConfigs: networkResources.configs,
+        networkConfigs: networkResources.backends.map(\.networkConfig),
         networkAttachments: networkResources.attachments,
         dynamicEnv: dynamicEnv,
         lifecycleStartedAt: startedAt,
         log: log
       )
     } catch {
+      for backend in networkResources.backends { backend.stop() }
       for session in networkResources.sessions { session.close() }
       throw error
     }
@@ -115,6 +121,7 @@ public actor KrunRuntimeService {
       )
     } catch {
       await controller.shutdownGuest()
+      for backend in networkResources.backends { backend.stop() }
       for session in networkResources.sessions { session.close() }
       throw error
     }
@@ -139,6 +146,7 @@ public actor KrunRuntimeService {
     self.copyPortPool = copyPool
     self.networkSessions = networkResources.sessions
     self.networkAttachments = networkResources.attachments
+    self.networkBackends = networkResources.backends
     self.socketForwarders = forwarders
     self.processes = [
       containerConfig.id: ProcessRecord(
@@ -754,6 +762,8 @@ public actor KrunRuntimeService {
     }
     await stopSocketForwarders()
     await controller.shutdownVMM()
+    for backend in networkBackends { backend.stop() }
+    networkBackends = []
     for session in networkSessions { session.close() }
     networkSessions = []
     networkAttachments = []
@@ -875,12 +885,13 @@ public actor KrunRuntimeService {
   private struct NetworkResources {
     let sessions: [XPCClientSession]
     let attachments: [Attachment]
-    let configs: [KrunNetworkConfig]
+    let backends: [KrunVMNetBackend]
   }
 
   private func prepareNetworking(
     config: ContainerConfiguration,
     networkInfos: [NetworkBootstrapInfo],
+    bundle: ContainerResource.Bundle,
     startedAt: ContinuousClock.Instant
   ) async throws -> NetworkResources {
     guard config.networks.count == networkInfos.count else {
@@ -890,13 +901,13 @@ public actor KrunRuntimeService {
       )
     }
     guard !networkInfos.isEmpty else {
-      return NetworkResources(sessions: [], attachments: [], configs: [])
+      return NetworkResources(sessions: [], attachments: [], backends: [])
     }
 
     let resourceClient = ContainerAPIClient.NetworkClient()
     var sessions: [XPCClientSession] = []
     var attachments: [Attachment] = []
-    var configs: [KrunNetworkConfig] = []
+    var backends: [KrunVMNetBackend] = []
     do {
       for (index, info) in networkInfos.enumerated() {
         let attachmentConfig = config.networks[index]
@@ -958,15 +969,24 @@ public actor KrunRuntimeService {
             variant: attachment.variant
           )
         }
-        configs.append(try KrunVMNetBackend.configuration(for: attachment))
+        let backend = try await KrunVMNetBackend.start(
+          attachment: attachment,
+          index: index,
+          mode: networkBackendMode,
+          logPath: bundle.filePath(for: "krun-vmnet-\(index).log"),
+          lifecycleStartedAt: startedAt,
+          log: log
+        )
         attachments.append(attachment)
+        backends.append(backend)
       }
       return NetworkResources(
         sessions: sessions,
         attachments: attachments,
-        configs: configs
+        backends: backends
       )
     } catch {
+      for backend in backends { backend.stop() }
       for session in sessions { session.close() }
       throw error
     }

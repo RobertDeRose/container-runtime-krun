@@ -49,13 +49,26 @@ extension KrunRuntimePlugin {
 
       nonisolated(unsafe) let anonymousConnection = xpc_connection_create(nil, nil)
       let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-      let helperPath = executable.deletingLastPathComponent().appendingPathComponent(
-        "container-krun-vmm-helper"
-      ).path
+      let binDirectory = executable.deletingLastPathComponent()
+      let helperPath = binDirectory.appendingPathComponent("container-krun-vmm-helper").path
+      let controlMarker = binDirectory.appendingPathComponent(".vmnet-helper-control")
+      let controlToken = try? String(contentsOf: controlMarker, encoding: .utf8)
+      let networkBackendMode: KrunNetworkBackendMode =
+        controlToken == "vmnet-helper-control-v1\n" ? .vmnetHelperControl : .nativeVMNet
+      if controlToken != nil {
+        try? FileManager.default.removeItem(at: controlMarker)
+      }
+      log.info(
+        "selected network backend",
+        metadata: [
+          "backend": networkBackendMode == .vmnetHelperControl ? "vmnet-helper-control" : "native-vmnet"
+        ]
+      )
       let service = KrunRuntimeService(
         root: URL(fileURLWithPath: root),
         connection: anonymousConnection,
         helperPath: helperPath,
+        networkBackendMode: networkBackendMode,
         log: log
       )
 

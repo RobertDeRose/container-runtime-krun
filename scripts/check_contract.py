@@ -93,6 +93,22 @@ for required in (
         print(f"network stream profiler contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 
+vmnet_backends_task = ROOT / ".mise/tasks/benchmark/vmnet-backends"
+if not vmnet_backends_task.is_file():
+    print("benchmark:vmnet-backends must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+vmnet_backends_task_text = vmnet_backends_task.read_text()
+for required in (
+    "--runtime-a-label krun-native-vmnet",
+    "--runtime-b-label krun-vmnet-helper",
+    "--runtime-a-backend native",
+    "--runtime-b-backend vmnet-helper",
+    ".vmnet-helper-control",
+):
+    if required not in vmnet_backends_task_text:
+        print(f"benchmark:vmnet-backends contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 network_stream_script = (ROOT / "scripts/benchmark_network_streams.py").read_text()
 for required in (
     '"guest_to_host"',
@@ -198,6 +214,7 @@ required_symbols = {
     "krun_add_vsock",
     "krun_add_vsock_port2",
     "krun_add_net_vmnet_shared",
+    "krun_add_net_unixgram",
     "krun_add_disk",
     "krun_disable_implicit_console",
     "krun_add_virtio_console_default",
@@ -209,6 +226,15 @@ missing_symbols = sorted(symbol for symbol in required_symbols if f'"{symbol}"' 
 if missing_symbols:
     print(f"helper symbol set incomplete: {missing_symbols}", file=sys.stderr)
     raise SystemExit(1)
+
+for required in (
+    '".vmnet-helper-control"',
+    '"vmnet-helper-control-v1\\n"',
+    "networkBackendMode: networkBackendMode",
+):
+    if required not in main:
+        print(f"runtime plugin control backend selector is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
 
 if 'type = "runtime"' not in config:
     print("plugin config does not declare a runtime service", file=sys.stderr)
@@ -427,8 +453,10 @@ for required in (
 
 vmnet_backend = (ROOT / "Sources/KrunRuntimeCore/KrunVMNetBackend.swift").read_text()
 for required in (
-    'case "allocationOnly"',
-    'case "reserved"',
+    'attachment.variant == "allocationOnly"',
+    ".vmnetHelperControl",
+    '"--enable-tso"',
+    '"--enable-checksum-offload"',
     "ipv4Gateway: attachment.ipv4Gateway.description",
     "macAddress: macAddress.bytes",
 ):

@@ -66,8 +66,9 @@ enum NativeVMNetPrivileges {
   }
 
   static func validate(config: KrunVMMConfig) throws -> Identity? {
+    let nativeNetworks = config.networks.filter { $0.backend == .nativeVMNetShared }
     guard geteuid() == 0 else {
-      guard config.networks.isEmpty else {
+      guard nativeNetworks.isEmpty else {
         throw PrivilegeError(
           description:
             "native vmnet must start through the installed privileged helper; run mise run native:install"
@@ -82,7 +83,7 @@ enum NativeVMNetPrivileges {
         throw PrivilegeError(description: "native vmnet requires macOS 26 or newer")
       }
       let caller = try sudoIdentity()
-      guard !config.networks.isEmpty, config.networks.count <= 16 else {
+      guard !nativeNetworks.isEmpty, nativeNetworks.count == config.networks.count, nativeNetworks.count <= 16 else {
         throw PrivilegeError(
           description: "privileged helper requires between 1 and 16 native vmnet attachments")
       }
@@ -95,7 +96,7 @@ enum NativeVMNetPrivileges {
       }
       try requireTrustedPath(KrunDefaults.nativeHelperPath)
       try requireTrustedPath(KrunDefaults.nativeLibkrunPath)
-      for network in config.networks {
+      for network in nativeNetworks {
         try network.validateNativeVMNet()
       }
       return caller

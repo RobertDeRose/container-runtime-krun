@@ -55,6 +55,10 @@ private final class KrunLibrary: @unchecked Sendable {
       UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
       UnsafeMutablePointer<UInt8>?, UInt32, UInt32
     ) -> Int32
+  typealias AddNetUnixgram =
+    @convention(c) (
+      UInt32, UnsafePointer<CChar>?, Int32, UnsafeMutablePointer<UInt8>?, UInt32, UInt32
+    ) -> Int32
   typealias AddConsole = @convention(c) (UInt32, Int32, Int32, Int32) -> Int32
   typealias SetKernel =
     @convention(c) (
@@ -80,6 +84,7 @@ private final class KrunLibrary: @unchecked Sendable {
   let addVsock: AddVsock
   let addVsockPort: AddVsockPort
   let addNetVMNetShared: AddNetVMNetShared
+  let addNetUnixgram: AddNetUnixgram
   let disableImplicitConsole: ToggleImplicitDevice
   let addConsole: AddConsole
   let setKernel: SetKernel
@@ -106,6 +111,8 @@ private final class KrunLibrary: @unchecked Sendable {
     self.addVsockPort = try Self.load(handle, "krun_add_vsock_port2", as: AddVsockPort.self)
     self.addNetVMNetShared = try Self.load(
       handle, "krun_add_net_vmnet_shared", as: AddNetVMNetShared.self)
+    self.addNetUnixgram = try Self.load(
+      handle, "krun_add_net_unixgram", as: AddNetUnixgram.self)
     self.disableImplicitConsole = try Self.load(
       handle, "krun_disable_implicit_console", as: ToggleImplicitDevice.self)
     self.addConsole = try Self.load(handle, "krun_add_virtio_console_default", as: AddConsole.self)
@@ -212,30 +219,60 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
   defer { _ = krun.freeContext(context) }
   HelperLifecycleTrace.mark(startedAt: startedAt, event: "context created", metadata: ["default_firmware": "disabled"])
 
-  // Only native interface creation is privileged. No VM files or guest CPU
-  // execution are touched until the irreversible UID/GID drop has completed.
+  // Only native interface creation is privileged. Unixgram control backends
+  // are configured by an ordinary helper process and need no privilege drop.
   for (index, network) in config.networks.enumerated() {
+    guard network.macAddress.count == 6 else {
+      throw KrunError(description: "network \(index) MAC address must contain 6 bytes")
+    }
     var mac = network.macAddress
-    try network.ipv4Gateway.withCString { gateway in
-      try network.ipv4Mask.withCString { mask in
+    switch network.backend {
+    case .nativeVMNetShared:
+      try network.ipv4Gateway.withCString { gateway in
+        try network.ipv4Mask.withCString { mask in
+          try mac.withUnsafeMutableBufferPointer { bytes in
+            try checked(
+              krun.addNetVMNetShared(
+                context, gateway, mask, bytes.baseAddress, network.features, network.flags
+              ),
+              "krun_add_net_vmnet_shared(net\(index))"
+            )
+          }
+        }
+      }
+      HelperLifecycleTrace.mark(
+        startedAt: startedAt, event: "native vmnet interface ready",
+        metadata: [
+          "backend": "libkrun-vmnet-shared", "network_index": "\(index)",
+          "api": "krun_add_net_vmnet_shared", "vmnet_api": "vmnet_start_interface",
+          "guest_dhcp": "false", "isolated": "true",
+          "gateway": network.ipv4Gateway, "netmask": network.ipv4Mask,
+          "features": "\(network.features)", "flags": "\(network.flags)",
+        ]
+      )
+    case .unixgram:
+      guard let socketPath = network.socketPath, !socketPath.isEmpty else {
+        throw KrunError(description: "unixgram network \(index) is missing socketPath")
+      }
+      try socketPath.withCString { path in
         try mac.withUnsafeMutableBufferPointer { bytes in
           try checked(
-            krun.addNetVMNetShared(context, gateway, mask, bytes.baseAddress, network.features, network.flags),
-            "krun_add_net_vmnet_shared(net\(index))"
+            krun.addNetUnixgram(
+              context, path, -1, bytes.baseAddress, network.features, network.flags
+            ),
+            "krun_add_net_unixgram(net\(index))"
           )
         }
       }
+      HelperLifecycleTrace.mark(
+        startedAt: startedAt, event: "vmnet-helper control interface ready",
+        metadata: [
+          "backend": "unixgram-vmnet-helper", "network_index": "\(index)",
+          "api": "krun_add_net_unixgram", "socket": socketPath,
+          "features": "\(network.features)", "flags": "\(network.flags)",
+        ]
+      )
     }
-    HelperLifecycleTrace.mark(
-      startedAt: startedAt, event: "native vmnet interface ready",
-      metadata: [
-        "backend": "libkrun-vmnet-shared", "network_index": "\(index)",
-        "api": "krun_add_net_vmnet_shared", "vmnet_api": "vmnet_start_interface",
-        "guest_dhcp": "false", "isolated": "true",
-        "gateway": network.ipv4Gateway, "netmask": network.ipv4Mask,
-        "features": "\(network.features)", "flags": "\(network.flags)",
-      ]
-    )
   }
   if let target {
     try NativeVMNetPrivileges.drop(to: target)
