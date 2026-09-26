@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""Benchmark the repository libkrun through krunkit + vmnet-helper offloading."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import tarfile
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+MIB = 1024 * 1024
+VMNET_HELPER_REPOSITORY = "https://github.com/nirs/vmnet-helper.git"
+VMNET_HELPER_COMMIT = "101f10944bfa8e19ca8d99e79ade03f497f65d8a"
+KRUNKIT_REPOSITORY = "https://github.com/libkrun/krunkit.git"
+KRUNKIT_COMMIT = "d2b085f6eabebc194f9c688fef0166bdaecb9677"
+LIBKRUN_DYLIB = "libkrun.1.19.4.dylib"
+
+
+@dataclass(frozen=True)
+class Sample:
+    streams: int
+    iteration: int
+    bits_per_second: float
+    mib_per_second: float
+
+
+def parse_streams(value: str) -> list[int]:
+    try:
+        streams = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("streams must be comma-separated positive integers") from error
+    if not streams or any(item <= 0 for item in streams):
+        raise argparse.ArgumentTypeError("streams must be comma-separated positive integers")
+    return streams
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("cannot calculate percentile of empty values")
+    if len(ordered) == 1:
+        return ordered[0]
+    position = fraction * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def summarize(samples: list[Sample]) -> list[dict[str, float | int]]:
+    rows: list[dict[str, float | int]] = []
+    for streams in sorted({sample.streams for sample in samples}):
+        rates = [sample.mib_per_second for sample in samples if sample.streams == streams]
+        rows.append({
+            "streams": streams,
+            "samples": len(rates),
+            "median_mib_per_second": statistics.median(rates),
+            "p10_mib_per_second": percentile(rates, 0.10),
+            "p90_mib_per_second": percentile(rates, 0.90),
+            "min_mib_per_second": min(rates),
+            "max_mib_per_second": max(rates),
+        })
+    return rows
+
+
+def git_head(path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run(argv: list[str], *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    print("[vmnet-helper-control] RUN " + " ".join(str(item) for item in argv), flush=True)
+    result = subprocess.run(
+        argv,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {' '.join(argv)}\n{result.stdout}{result.stderr}"
+        )
+    return result
+
+
+def ensure_checkout(path: Path, repository: str, commit: str, timeout: int) -> None:
+    if not (path / ".git").is_dir():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "clone", "--filter=blob:none", repository, str(path)], timeout=timeout)
+    status = run(
+        ["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],
+        timeout=timeout,
+    ).stdout.strip()
+    if status:
+        raise RuntimeError(f"control dependency checkout is dirty: {path}\n{status}")
+    current = git_head(path)
+    if current != commit:
+        run(["git", "-C", str(path), "fetch", "origin", commit], timeout=timeout)
+        run(["git", "-C", str(path), "checkout", "--detach", commit], timeout=timeout)
+
+
+def find_vmnet_helper() -> Path:
+    candidates: list[Path] = []
+    brew = shutil.which("brew")
+    if brew:
+        result = subprocess.run(
+            [brew, "--prefix", "vmnet-helper"], capture_output=True, text=True, check=False
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            prefix = Path(result.stdout.strip())
+            candidates.extend([
+                prefix / "libexec/vmnet-helper",
+                prefix / "bin/vmnet-helper",
+            ])
+    candidates.append(Path("/opt/vmnet-helper/bin/vmnet-helper"))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError(
+        "vmnet-helper is not installed; on macOS 26 install it with "
+        "`brew tap nirs/vmnet-helper && brew trust nirs/vmnet-helper && brew install vmnet-helper`"
+    )
+
+
+def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> Path:
+    libkrun = root / ".build-deps/libkrun/target/release" / LIBKRUN_DYLIB
+    if not libkrun.is_file():
+        raise RuntimeError(f"missing {libkrun}; run `mise run libkrun` first")
+
+    lib_dir = prefix / "lib"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    for name in (LIBKRUN_DYLIB, "libkrun.1.dylib", "libkrun.dylib"):
+        target = lib_dir / name
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        target.symlink_to(libkrun)
+
+    stamp_value = f"{KRUNKIT_COMMIT} {sha256(libkrun)}\n"
+    stamp = prefix / ".krunkit-control-stamp"
+    binary = prefix / "bin/krunkit"
+    if not binary.is_file() or not stamp.is_file() or stamp.read_text() != stamp_value:
+        subprocess.run(["cargo", "clean"], cwd=checkout, check=False, stdout=subprocess.DEVNULL)
+        run(["make", "install", f"PREFIX={prefix}"], cwd=checkout, timeout=timeout)
+        stamp.write_text(stamp_value, encoding="utf-8")
+    return binary
+
+
+def ssh(vm_name: str, config: Path, argv: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    return run(["ssh", "-F", str(config), vm_name, *argv], timeout=timeout)
+
+
+def wait_for_ssh(vm_name: str, config: Path, timeout: int) -> None:
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["ssh", "-F", str(config), "-o", "ConnectTimeout=2", vm_name, "true"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        last = result.stdout + result.stderr
+        time.sleep(1)
+    raise RuntimeError(f"timeout waiting for control VM SSH: {last}")
+
+
+def iperf_sample(address: str, streams: int, seconds: int, timeout: int) -> Sample:
+    result = run(
+        [
+            "iperf3", "--client", address, "--reverse", "--parallel", str(streams),
+            "--time", str(seconds), "--json",
+        ],
+        timeout=max(timeout, seconds + 30),
+    )
+    data = json.loads(result.stdout)
+    bits_per_second = float(data["end"]["sum_received"]["bits_per_second"])
+    return Sample(
+        streams=streams,
+        iteration=0,
+        bits_per_second=bits_per_second,
+        mib_per_second=bits_per_second / 8 / MIB,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--streams", type=parse_streams, default=parse_streams("1,4,8"))
+    parser.add_argument("--seconds", type=int, default=20)
+    parser.add_argument("--warmup-seconds", type=int, default=3)
+    parser.add_argument("--iterations", type=int, default=6)
+    parser.add_argument("--cpus", type=int, default=4)
+    parser.add_argument("--memory", type=int, default=2048)
+    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--result-root", type=Path, default=Path("validation-results"))
+    args = parser.parse_args()
+    if min(args.seconds, args.warmup_seconds, args.iterations, args.cpus, args.memory, args.timeout) <= 0:
+        parser.error("durations, iterations, cpus, memory, and timeout must be positive")
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        parser.error("the vmnet-helper control requires Apple Silicon macOS")
+    for command in ("git", "make", "cargo", "iperf3", "ssh", "mkisofs", "bsdtar", "otool"):
+        if shutil.which(command) is None:
+            parser.error(f"required command not found: {command}")
+    if not list((Path.home() / ".ssh").glob("id_*.pub")):
+        parser.error("vmnet-helper control VM requires at least one ~/.ssh/id_*.pub key")
+
+    root = Path(__file__).resolve().parent.parent
+    deps = root / ".build-deps"
+    helper_checkout = deps / "vmnet-helper-control"
+    krunkit_checkout = deps / "krunkit-control"
+    control_prefix = deps / "krunkit-control-prefix"
+    ensure_checkout(helper_checkout, VMNET_HELPER_REPOSITORY, VMNET_HELPER_COMMIT, args.timeout)
+    ensure_checkout(krunkit_checkout, KRUNKIT_REPOSITORY, KRUNKIT_COMMIT, args.timeout)
+    helper_binary = find_vmnet_helper()
+    krunkit_binary = prepare_krunkit(root, krunkit_checkout, control_prefix, args.timeout)
+
+    sys.path.insert(0, str(helper_checkout))
+    import testing  # type: ignore[import-not-found]
+    import testing.helper as helper_module  # type: ignore[import-not-found]
+
+    helper_module.HELPER = str(helper_binary)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    token = f"{stamp}-{os.getpid()}"
+    output = args.result_root / f"vmnet-helper-control-{token}"
+    archive = args.result_root / f"container-runtime-krun-vmnet-helper-control-{token}.tar.gz"
+    output.mkdir(parents=True, exist_ok=True)
+    args.result_root.mkdir(parents=True, exist_ok=True)
+    vm_name = f"krun-control-{os.getpid()}"
+    helper_log = output / "vmnet-helper.log"
+    helper_version = run([str(helper_binary), "--version"], timeout=args.timeout).stdout.strip()
+    (output / "krunkit-otool.txt").write_text(
+        run(["otool", "-L", str(krunkit_binary)], timeout=args.timeout).stdout,
+        encoding="utf-8",
+    )
+    provenance = root / ".build-deps/libkrun/target/release/native-vmnet.provenance"
+    if provenance.is_file():
+        shutil.copy2(provenance, output / "libkrun.provenance")
+
+    vm_args = SimpleNamespace(
+        vm_name=vm_name,
+        operation_mode="shared",
+        start_address=None,
+        end_address=None,
+        subnet_mask=None,
+        shared_interface=None,
+        network_name=None,
+        enable_isolation=False,
+        enable_offloading=True,
+        stats_interval=1,
+        verbose=False,
+        driver="krunkit",
+        driver_command=str(krunkit_binary),
+        cpus=args.cpus,
+        memory=args.memory,
+        distro="ubuntu",
+        dns_servers=["8.8.8.8", "1.1.1.1"],
+        ip_address=None,
+        busy_poll=False,
+    )
+
+    vm_sock = helper_sock = helper = vm = None
+    samples: list[Sample] = []
+    try:
+        vm_sock, helper_sock = testing.socketpair(True)
+        helper = testing.Helper(vm_args, fd=helper_sock.fileno(), logfile=str(helper_log))
+        helper.start()
+        vm = testing.VM(
+            vm_args,
+            helper.interface[testing.VMNET_MAC_ADDRESS],
+            fd=vm_sock.fileno(),
+        )
+        vm.start()
+        ssh_config = Path.home() / ".vmnet-helper/vms" / vm_name / "ssh.config"
+        wait_for_ssh(vm_name, ssh_config, args.timeout)
+        ssh(
+            vm_name,
+            ssh_config,
+            [
+                "sh", "-lc",
+                "command -v iperf3 >/dev/null || "
+                "(sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3)",
+            ],
+            args.timeout,
+        )
+        ssh(vm_name, ssh_config, ["sh", "-lc", "pkill iperf3 >/dev/null 2>&1 || true; iperf3 -s -D"], args.timeout)
+        address = socket.gethostbyname(vm.fqdn())
+
+        for streams in args.streams:
+            warmup = iperf_sample(address, streams, args.warmup_seconds, args.timeout)
+            print(
+                f"[vmnet-helper-control] warmup P{streams}: {warmup.mib_per_second:.1f} MiB/s",
+                flush=True,
+            )
+            for iteration in range(1, args.iterations + 1):
+                sample = iperf_sample(address, streams, args.seconds, args.timeout)
+                sample = Sample(
+                    streams=sample.streams,
+                    iteration=iteration,
+                    bits_per_second=sample.bits_per_second,
+                    mib_per_second=sample.mib_per_second,
+                )
+                samples.append(sample)
+                print(
+                    f"[vmnet-helper-control] P{streams} #{iteration}: "
+                    f"{sample.mib_per_second:.1f} MiB/s",
+                    flush=True,
+                )
+
+        metadata = {
+            "direction": "guest_to_host",
+            "transport": "krunkit unixgram -> vmnet-helper -> vmnet_write",
+            "offloading": "TSO + checksum",
+            "streams": args.streams,
+            "seconds": args.seconds,
+            "warmup_seconds": args.warmup_seconds,
+            "iterations": args.iterations,
+            "cpus": args.cpus,
+            "memory_mib": args.memory,
+            "repository_head": git_head(root),
+            "libkrun_head": git_head(root / ".build-deps/libkrun"),
+            "libkrun_sha256": sha256(root / ".build-deps/libkrun/target/release" / LIBKRUN_DYLIB),
+            "vmnet_helper_commit": VMNET_HELPER_COMMIT,
+            "vmnet_helper_binary": str(helper_binary),
+            "vmnet_helper_version": helper_version,
+            "krunkit_commit": KRUNKIT_COMMIT,
+            "krunkit_binary": str(krunkit_binary),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+        }
+        (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        (output / "samples.json").write_text(
+            json.dumps([asdict(sample) for sample in samples], indent=2) + "\n", encoding="utf-8"
+        )
+        rows = summarize(samples)
+        (output / "summary.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+        with (output / "summary.tsv").open("w", encoding="utf-8") as stream:
+            stream.write(
+                "streams\tsamples\tmedian_mib_per_second\tp10_mib_per_second\t"
+                "p90_mib_per_second\tmin_mib_per_second\tmax_mib_per_second\n"
+            )
+            for row in rows:
+                stream.write(
+                    f"{row['streams']}\t{row['samples']}\t{row['median_mib_per_second']:.3f}\t"
+                    f"{row['p10_mib_per_second']:.3f}\t{row['p90_mib_per_second']:.3f}\t"
+                    f"{row['min_mib_per_second']:.3f}\t{row['max_mib_per_second']:.3f}\n"
+                )
+    finally:
+        if vm is not None:
+            vm.stop()
+        if helper is not None:
+            helper.stop()
+        if vm_sock is not None:
+            vm_sock.close()
+        if helper_sock is not None:
+            helper_sock.close()
+
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(output, arcname=output.name)
+    print(f"[vmnet-helper-control] archive: {archive}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
