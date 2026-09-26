@@ -46,6 +46,47 @@ class VmnetHelperControlTests(unittest.TestCase):
         self.assertNotIn('"bsdtar"', source)
         self.assertIn('"hdiutil"', source)
 
+
+    def test_prepare_krunkit_builds_without_make_or_install_name_tool(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runtime"
+            checkout = Path(tmp) / "krunkit"
+            prefix = Path(tmp) / "prefix"
+            libkrun = root / ".build-deps/libkrun/target/release" / MODULE.LIBKRUN_DYLIB
+            libkrun.parent.mkdir(parents=True)
+            libkrun.write_bytes(b"libkrun")
+            (checkout / "target/release").mkdir(parents=True)
+            (checkout / "edk2").mkdir()
+            source_binary = checkout / "target/release/krunkit"
+            source_binary.write_bytes(b"krunkit")
+            (checkout / "edk2/KRUN_EFI.silent.fd").write_bytes(b"firmware")
+
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append((argv, kwargs))
+                stdout = "path @executable_path/../lib (offset 12)\n" if argv[:2] == ["otool", "-l"] else ""
+                return mock.Mock(returncode=0, stdout=stdout, stderr="")
+
+            with mock.patch.object(MODULE, "run", side_effect=fake_run), mock.patch.object(
+                MODULE.subprocess, "run", return_value=mock.Mock(returncode=0)
+            ):
+                binary = MODULE.prepare_krunkit(root, checkout, prefix, 30)
+
+            cargo = next(call for call in calls if call[0][:2] == ["cargo", "build"])
+            self.assertEqual(cargo[0], ["cargo", "build", "--release"])
+            self.assertEqual(cargo[1]["env"]["PREFIX"], str(prefix))
+            self.assertIn("@executable_path/../lib", cargo[1]["env"]["RUSTFLAGS"])
+            self.assertEqual(binary.read_bytes(), b"krunkit")
+            self.assertEqual((prefix / "share/krunkit/KRUN_EFI.silent.fd").read_bytes(), b"firmware")
+
+    def test_control_does_not_invoke_krunkit_make_install(self):
+        source = MODULE_PATH.read_text()
+        self.assertNotIn('["make", "install"', source)
+        self.assertNotIn('"install_name_tool"', source)
+
     def test_create_cidata_iso_uses_cidata_volume_label(self):
         class Store:
             @staticmethod

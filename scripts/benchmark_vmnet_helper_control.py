@@ -99,7 +99,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def run(argv: list[str], *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+def run(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 300,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     print("[vmnet-helper-control] RUN " + " ".join(str(item) for item in argv), flush=True)
     result = subprocess.run(
         argv,
@@ -108,6 +114,7 @@ def run(argv: list[str], *, cwd: Path | None = None, timeout: int = 300) -> subp
         text=True,
         timeout=timeout,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -171,9 +178,29 @@ def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> P
     stamp_value = f"{KRUNKIT_COMMIT} {sha256(libkrun)}\n"
     stamp = prefix / ".krunkit-control-stamp"
     binary = prefix / "bin/krunkit"
+    firmware = prefix / "share/krunkit/KRUN_EFI.silent.fd"
     if not binary.is_file() or not stamp.is_file() or stamp.read_text() != stamp_value:
         subprocess.run(["cargo", "clean"], cwd=checkout, check=False, stdout=subprocess.DEVNULL)
-        run(["make", "install", f"PREFIX={prefix}"], cwd=checkout, timeout=timeout)
+        env = os.environ.copy()
+        env["PREFIX"] = str(prefix)
+        rpath = "-C link-arg=-Wl,-rpath,@executable_path/../lib"
+        env["RUSTFLAGS"] = " ".join(filter(None, [env.get("RUSTFLAGS", "").strip(), rpath]))
+        run(["cargo", "build", "--release"], cwd=checkout, timeout=timeout, env=env)
+
+        source_binary = checkout / "target/release/krunkit"
+        source_firmware = checkout / "edk2/KRUN_EFI.silent.fd"
+        if not source_binary.is_file() or not source_firmware.is_file():
+            raise RuntimeError("krunkit build did not produce the expected binary and firmware")
+
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        firmware.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_binary, binary)
+        shutil.copy2(source_firmware, firmware)
+        binary.chmod(0o755)
+
+        load_commands = run(["otool", "-l", str(binary)], timeout=timeout).stdout
+        if "@executable_path/../lib" not in load_commands:
+            raise RuntimeError("krunkit control binary is missing its libkrun rpath")
         stamp.write_text(stamp_value, encoding="utf-8")
     return binary
 
@@ -328,7 +355,7 @@ def main() -> int:
         parser.error("durations, iterations, cpus, memory, and timeout must be positive")
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("the vmnet-helper control requires Apple Silicon macOS")
-    for command in ("git", "make", "cargo", "ssh", "hdiutil", "otool"):
+    for command in ("git", "cargo", "ssh", "hdiutil", "otool"):
         if shutil.which(command) is None:
             parser.error(f"required command not found: {command}")
     if not list((Path.home() / ".ssh").glob("id_*.pub")):
