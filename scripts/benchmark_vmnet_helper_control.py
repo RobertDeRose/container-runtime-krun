@@ -31,6 +31,24 @@ VMNET_HELPER_COMMIT = "101f10944bfa8e19ca8d99e79ade03f497f65d8a"
 KRUNKIT_REPOSITORY = "https://github.com/libkrun/krunkit.git"
 KRUNKIT_COMMIT = "d2b085f6eabebc194f9c688fef0166bdaecb9677"
 LIBKRUN_DYLIB = "libkrun.1.19.4.dylib"
+KRUNKIT_CONTROL_PATCH = "headless-no-gpu-v1"
+
+KRUNKIT_GPU_BLOCK = """        // Temporarily enable GPU by default
+        let virgl_flags = VIRGLRENDERER_VENUS | VIRGLRENDERER_NO_VIRGL;
+        let sys = sysinfo::System::new_all();
+        // Limit RAM + VRAM to 64 GB (36 bit IPA address limit) minus 2 GB (start address plus rounding).
+        let rounded_mem = ((args.memory as u64) / 1024 + 1) * 1024;
+        let vram = std::cmp::min((63488 - rounded_mem) * 1024 * 1024, sys.total_memory());
+        if unsafe { krun_set_gpu_options2(id, virgl_flags, vram) } < 0 {
+            return Err(anyhow!(\"unable to set krun vCPU/RAM configuration\"));
+        }
+
+"""
+
+KRUNKIT_HEADLESS_BLOCK = """        // The control must use the runtime's BLK+NET libkrun build exactly as-is.
+        // Do not configure krunkit's optional GPU path for this headless network benchmark.
+
+"""
 
 
 @dataclass(frozen=True)
@@ -139,6 +157,37 @@ def ensure_checkout(path: Path, repository: str, commit: str, timeout: int) -> N
         run(["git", "-C", str(path), "checkout", "--detach", commit], timeout=timeout)
 
 
+
+def patch_krunkit_headless(checkout: Path) -> tuple[Path, str]:
+    context = checkout / "src/context.rs"
+    source = context.read_text(encoding="utf-8")
+    if KRUNKIT_GPU_BLOCK not in source:
+        raise RuntimeError("pinned krunkit GPU setup block changed; update the control patch")
+    context.write_text(
+        source.replace(KRUNKIT_GPU_BLOCK, KRUNKIT_HEADLESS_BLOCK, 1),
+        encoding="utf-8",
+    )
+    return context, source
+
+
+def vm_failure_details(vm: object) -> str:
+    vm_dir = Path.home() / ".vmnet-helper/vms" / str(vm.vm_name)
+    sections: list[str] = []
+    for name in ("krunkit.command", "krunkit.log", "serial.log"):
+        path = vm_dir / name
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            content = f"<unable to read: {error}>"
+        if len(content) > 32_000:
+            content = content[-32_000:]
+            content = "<truncated to final 32000 characters>\n" + content
+        sections.append(f"--- {path} ---\n{content.rstrip()}")
+    return "\n".join(sections)
+
+
 def find_vmnet_helper() -> Path:
     candidates: list[Path] = []
     brew = shutil.which("brew")
@@ -175,17 +224,28 @@ def prepare_krunkit(root: Path, checkout: Path, prefix: Path, timeout: int) -> P
             target.unlink()
         target.symlink_to(libkrun)
 
-    stamp_value = f"{KRUNKIT_COMMIT} {sha256(libkrun)}\n"
+    stamp_value = f"{KRUNKIT_COMMIT} {sha256(libkrun)} {KRUNKIT_CONTROL_PATCH}\n"
     stamp = prefix / ".krunkit-control-stamp"
     binary = prefix / "bin/krunkit"
     firmware = prefix / "share/krunkit/KRUN_EFI.silent.fd"
     if not binary.is_file() or not stamp.is_file() or stamp.read_text() != stamp_value:
-        subprocess.run(["cargo", "clean"], cwd=checkout, check=False, stdout=subprocess.DEVNULL)
-        env = os.environ.copy()
-        env["PREFIX"] = str(prefix)
-        rpath = "-C link-arg=-Wl,-rpath,@executable_path/../lib"
-        env["RUSTFLAGS"] = " ".join(filter(None, [env.get("RUSTFLAGS", "").strip(), rpath]))
-        run(["cargo", "build", "--release"], cwd=checkout, timeout=timeout, env=env)
+        context, original_context = patch_krunkit_headless(checkout)
+        try:
+            subprocess.run(["cargo", "clean"], cwd=checkout, check=False, stdout=subprocess.DEVNULL)
+            env = os.environ.copy()
+            env["PREFIX"] = str(prefix)
+            rpath = "-C link-arg=-Wl,-rpath,@executable_path/../lib"
+            env["RUSTFLAGS"] = " ".join(filter(None, [env.get("RUSTFLAGS", "").strip(), rpath]))
+            run(["cargo", "build", "--release"], cwd=checkout, timeout=timeout, env=env)
+        finally:
+            context.write_text(original_context, encoding="utf-8")
+
+        status = run(
+            ["git", "-C", str(checkout), "status", "--porcelain=v1", "--untracked-files=all"],
+            timeout=timeout,
+        ).stdout.strip()
+        if status:
+            raise RuntimeError(f"krunkit checkout changed during control build:\n{status}")
 
         source_binary = checkout / "target/release/krunkit"
         source_firmware = checkout / "edk2/KRUN_EFI.silent.fd"
@@ -245,7 +305,13 @@ def wait_for_ssh(vm: object, config: Path, timeout: int) -> None:
                 return
             last = result.stdout + result.stderr
 
-        vm.check_running()
+        try:
+            vm.check_running()
+        except RuntimeError as error:
+            details = vm_failure_details(vm)
+            if details:
+                raise RuntimeError(f"{error}\n{details}") from error
+            raise
         time.sleep(1)
     raise RuntimeError(f"timeout waiting for control VM SSH: {last}")
 

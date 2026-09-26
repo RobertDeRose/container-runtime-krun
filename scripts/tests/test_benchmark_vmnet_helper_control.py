@@ -59,6 +59,8 @@ class VmnetHelperControlTests(unittest.TestCase):
             libkrun.write_bytes(b"libkrun")
             (checkout / "target/release").mkdir(parents=True)
             (checkout / "edk2").mkdir()
+            (checkout / "src").mkdir()
+            (checkout / "src/context.rs").write_text(MODULE.KRUNKIT_GPU_BLOCK)
             source_binary = checkout / "target/release/krunkit"
             source_binary.write_bytes(b"krunkit")
             (checkout / "edk2/KRUN_EFI.silent.fd").write_bytes(b"firmware")
@@ -113,7 +115,7 @@ class VmnetHelperControlTests(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b"cached")
             (prefix / ".krunkit-control-stamp").write_text(
-                f"{MODULE.KRUNKIT_COMMIT} {MODULE.sha256(libkrun)}\n"
+                f"{MODULE.KRUNKIT_COMMIT} {MODULE.sha256(libkrun)} {MODULE.KRUNKIT_CONTROL_PATCH}\n"
             )
 
             calls = []
@@ -161,6 +163,48 @@ class VmnetHelperControlTests(unittest.TestCase):
             MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
 
         vm.check_running.assert_called_once_with()
+
+    def test_patch_krunkit_headless_removes_default_gpu_setup(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp)
+            context = checkout / "src/context.rs"
+            context.parent.mkdir(parents=True)
+            original = f"before\n{MODULE.KRUNKIT_GPU_BLOCK}after\n"
+            context.write_text(original)
+
+            path, source = MODULE.patch_krunkit_headless(checkout)
+
+            self.assertEqual(path, context)
+            self.assertEqual(source, original)
+            patched = context.read_text()
+            self.assertNotIn(MODULE.KRUNKIT_GPU_BLOCK, patched)
+            self.assertIn(MODULE.KRUNKIT_HEADLESS_BLOCK, patched)
+
+    def test_wait_for_ssh_surfaces_krunkit_log_on_vm_exit(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            vm_dir = home / ".vmnet-helper/vms/control"
+            vm_dir.mkdir(parents=True)
+            (vm_dir / "krunkit.command").write_text("krunkit --device test\n")
+            (vm_dir / "krunkit.log").write_text("fatal control failure\n")
+
+            vm = mock.Mock()
+            vm.vm_name = "control"
+            vm.check_running.side_effect = RuntimeError("Virtual machine terminated (exitcode -6)")
+            failed = mock.Mock(returncode=255, stdout="", stderr="not ready")
+
+            with mock.patch.object(MODULE.Path, "home", return_value=home), mock.patch.object(
+                MODULE.subprocess, "run", return_value=failed
+            ), mock.patch.object(MODULE.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "fatal control failure") as caught:
+                    MODULE.wait_for_ssh(vm, Path("ssh.config"), 30)
+
+            self.assertIn("krunkit --device test", str(caught.exception))
+            self.assertIn("exitcode -6", str(caught.exception))
 
     def test_create_cidata_iso_uses_cidata_volume_label(self):
         class Store:
