@@ -118,6 +118,10 @@ def summarize_profile(rows: list[dict[str, object]]) -> dict[str, object]:
     net_rx_vectors: list[list[int]] = []
     softnet_vectors: list[list[int]] = []
     queue_layouts: list[list[str]] = []
+    virtio_feature_sets: list[list[int]] = []
+    virtio_drivers: list[str] = []
+    eth0_devices: list[str] = []
+    queue_settings: list[dict[str, object]] = []
 
     for row in rows:
         delta = row.get("delta", {})
@@ -152,6 +156,18 @@ def summarize_profile(rows: list[dict[str, object]]) -> dict[str, object]:
         queues = delta.get("net_queues", [])
         if isinstance(queues, list):
             queue_layouts.append([str(value) for value in queues])
+        feature_bits = delta.get("enabled_virtio_feature_bits", [])
+        if isinstance(feature_bits, list):
+            virtio_feature_sets.append([int(value) for value in feature_bits])
+        driver = delta.get("virtio_driver", "")
+        if isinstance(driver, str) and driver:
+            virtio_drivers.append(driver)
+        device = delta.get("eth0_device", "")
+        if isinstance(device, str) and device:
+            eth0_devices.append(device)
+        settings = delta.get("queue_settings", {})
+        if isinstance(settings, dict):
+            queue_settings.append(settings)
 
     median_cpu = {
         cpu: statistics.median(values)
@@ -175,6 +191,10 @@ def summarize_profile(rows: list[dict[str, object]]) -> dict[str, object]:
         "net_queues": queue_layout,
         "rx_queue_count": sum(name.startswith("rx-") for name in queue_layout),
         "tx_queue_count": sum(name.startswith("tx-") for name in queue_layout),
+        "enabled_virtio_feature_bits": virtio_feature_sets[0] if virtio_feature_sets else [],
+        "virtio_driver": virtio_drivers[0] if virtio_drivers else "",
+        "eth0_device": eth0_devices[0] if eth0_devices else "",
+        "queue_settings": queue_settings[0] if queue_settings else {},
         "median_cpu_utilization_percent": median_cpu,
         "busiest_cpu": busiest_cpu,
         "busiest_cpu_median_utilization_percent": median_cpu.get(busiest_cpu, 0.0),

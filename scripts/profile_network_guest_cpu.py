@@ -33,9 +33,42 @@ except Exception:
     pass
 
 try:
-    eth0_device = str(Path("/sys/class/net/eth0/device").resolve())
+    eth0_device_path = Path("/sys/class/net/eth0/device").resolve()
+    eth0_device = str(eth0_device_path)
 except Exception:
+    eth0_device_path = None
     eth0_device = ""
+
+virtio_features = ""
+virtio_status = ""
+virtio_modalias = ""
+virtio_uevent = ""
+virtio_driver = ""
+if eth0_device_path is not None:
+    virtio_features = read_text(eth0_device_path / "features").strip()
+    virtio_status = read_text(eth0_device_path / "status").strip()
+    virtio_modalias = read_text(eth0_device_path / "modalias").strip()
+    virtio_uevent = read_text(eth0_device_path / "uevent").strip()
+    try:
+        virtio_driver = str((eth0_device_path / "driver").resolve())
+    except Exception:
+        pass
+
+queue_settings = {}
+for queue in queues:
+    base = Path("/sys/class/net/eth0/queues") / queue
+    values = {}
+    for name in ("rps_cpus", "rps_flow_cnt", "xps_cpus", "tx_maxrate"):
+        path = base / name
+        if path.exists():
+            values[name] = read_text(path).strip()
+    bql = base / "byte_queue_limits"
+    if bql.exists():
+        for name in ("limit", "limit_max", "limit_min", "inflight"):
+            path = bql / name
+            if path.exists():
+                values[f"byte_queue_limits/{name}"] = read_text(path).strip()
+    queue_settings[queue] = values
 
 irq_affinity = {}
 for path in sorted(Path("/proc/irq").glob("*/smp_affinity_list")):
@@ -51,6 +84,12 @@ print(json.dumps({
     "softnet_stat": read_text("/proc/net/softnet_stat"),
     "net_queues": queues,
     "eth0_device": eth0_device,
+    "virtio_features": virtio_features,
+    "virtio_status": virtio_status,
+    "virtio_modalias": virtio_modalias,
+    "virtio_uevent": virtio_uevent,
+    "virtio_driver": virtio_driver,
+    "queue_settings": queue_settings,
     "irq_affinity": irq_affinity,
 }, sort_keys=True))
 '''
@@ -205,6 +244,15 @@ def interrupt_delta(before: str, after: str, eth0_device: str) -> list[dict[str,
     return rows[:20]
 
 
+def enabled_virtio_feature_bits(value: object) -> list[int]:
+    if not isinstance(value, str):
+        return []
+    bits = value.strip()
+    if not bits or any(bit not in "01" for bit in bits):
+        return []
+    return [index for index, bit in enumerate(bits) if bit == "1"]
+
+
 def snapshot_delta(before: dict[str, object], after: dict[str, object]) -> dict[str, object]:
     return {
         "cpu": cpu_delta(str(before.get("proc_stat", "")), str(after.get("proc_stat", ""))),
@@ -217,6 +265,15 @@ def snapshot_delta(before: dict[str, object], after: dict[str, object]) -> dict[
         ),
         "net_queues": after.get("net_queues", []),
         "eth0_device": after.get("eth0_device", ""),
+        "virtio_features": after.get("virtio_features", ""),
+        "enabled_virtio_feature_bits": enabled_virtio_feature_bits(
+            after.get("virtio_features", "")
+        ),
+        "virtio_status": after.get("virtio_status", ""),
+        "virtio_modalias": after.get("virtio_modalias", ""),
+        "virtio_uevent": after.get("virtio_uevent", ""),
+        "virtio_driver": after.get("virtio_driver", ""),
+        "queue_settings": after.get("queue_settings", {}),
         "irq_affinity": after.get("irq_affinity", {}),
     }
 

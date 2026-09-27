@@ -49,6 +49,10 @@ class ProcParsingTests(unittest.TestCase):
         self.assertEqual(rows[0]["per_cpu"], [10, 5])
         self.assertTrue(rows[0]["matches_eth0_device"])
 
+    def test_enabled_virtio_feature_bits_decodes_sysfs_order(self):
+        self.assertEqual(profile.enabled_virtio_feature_bits("101001\n"), [0, 2, 5])
+        self.assertEqual(profile.enabled_virtio_feature_bits("ERROR: missing"), [])
+
     def test_guest_snapshot_script_compiles(self):
         compile(profile.GUEST_SNAPSHOT, "<guest-snapshot>", "exec")
 

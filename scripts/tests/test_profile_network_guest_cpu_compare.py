@@ -40,6 +40,10 @@ class SummaryTests(unittest.TestCase):
                         }
                     ],
                     "net_queues": ["rx-0", "rx-1", "tx-0", "tx-1"],
+                    "enabled_virtio_feature_bits": [0, 5, 28, 29, 32],
+                    "virtio_driver": "/sys/bus/pci/drivers/virtio-pci",
+                    "eth0_device": "/sys/devices/pci/virtio0",
+                    "queue_settings": {"rx-0": {"rps_cpus": "0"}},
                 },
             },
             {
@@ -76,6 +80,10 @@ class SummaryTests(unittest.TestCase):
         self.assertAlmostEqual(summary["eth_irq_dominant_cpu_share"], 0.95)
         self.assertAlmostEqual(summary["net_rx_dominant_cpu_share"], 0.85)
         self.assertAlmostEqual(summary["softnet_dominant_cpu_share"], 0.75)
+        self.assertEqual(summary["enabled_virtio_feature_bits"], [0, 5, 28, 29, 32])
+        self.assertEqual(summary["virtio_driver"], "/sys/bus/pci/drivers/virtio-pci")
+        self.assertEqual(summary["eth0_device"], "/sys/devices/pci/virtio0")
+        self.assertEqual(summary["queue_settings"], {"rx-0": {"rps_cpus": "0"}})
 
 
 if __name__ == "__main__":
