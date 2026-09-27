@@ -51,7 +51,7 @@ class EndpointNamingTests(unittest.TestCase):
                 endpoint = network_streams.start_endpoint(
                     bench,
                     "container-runtime-krun",
-                    "krun-vmnet-helper-no-offload",
+                    "krun-vmnet-helper-offload",
                     "python:3.13-alpine",
                     "default",
                     "krun-streams-20260927t022723z-70871",

@@ -63,7 +63,7 @@ import Testing
     ipv4Mask: "255.255.255.0",
     socketPath: "/tmp/vmnet-helper.sock",
     macAddress: [2, 0, 0, 0, 0, 2],
-    features: KrunNetworkFeatures.nativeVMNetTCPOffload
+    features: KrunNetworkFeatures.unixgramCompatOffload
   )
   let decoded = try JSONDecoder().decode(
     KrunNetworkConfig.self, from: JSONEncoder().encode(network)
@@ -89,6 +89,7 @@ import Testing
 
 @Test func nativeVMNetAcceptsBoundedStaticConfiguration() throws {
   #expect(KrunNetworkFeatures.nativeVMNetTCPOffload == 6531)
+  #expect(KrunNetworkFeatures.unixgramCompatOffload == 19587)
   let network = KrunNetworkConfig(
     ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0",
     macAddress: [2, 0, 0, 0, 0, 1],

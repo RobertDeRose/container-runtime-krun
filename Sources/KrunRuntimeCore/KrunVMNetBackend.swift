@@ -112,6 +112,8 @@ public final class KrunVMNetBackend: @unchecked Sendable {
         "--socket", socketPath,
         "--operation-mode", "shared",
         "--enable-isolation",
+        "--enable-tso",
+        "--enable-checksum-offload",
         "--start-address", attachment.ipv4Gateway.description,
         "--end-address", ipv4String(attachment.ipv4Address.upper.value - 1),
         "--subnet-mask", ipv4String(attachment.ipv4Address.prefix.prefixMask32),
@@ -137,7 +139,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
             "network_index": "\(index)",
             "pid": "\(process.processIdentifier)",
             "socket": "\(socketPath)",
-            "offload": "disabled",
+            "offload": "krunkit-unixgram-compat",
           ]
         )
         return KrunVMNetBackend(
@@ -147,7 +149,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
             ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
             socketPath: socketPath,
             macAddress: macAddress,
-            features: 0
+            features: KrunNetworkFeatures.unixgramCompatOffload
           ),
           stopBackend: {
             terminate(process)

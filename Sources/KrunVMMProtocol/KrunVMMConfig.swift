@@ -73,6 +73,12 @@ public enum KrunNetworkFeatures {
   // Keep in sync with VMNET_NATIVE_TCP_FEATURES.
   public static let nativeVMNetTCPOffload: UInt32 =
     (1 << 0) | (1 << 1) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12)
+
+  // Match krunkit's public Unixgram `offloading=on` compatibility mask:
+  // CSUM, GUEST_CSUM, GUEST_TSO4, GUEST_UFO, HOST_TSO4, HOST_UFO.
+  // This intentionally differs from the native-vmnet TSO4/TSO6 mask.
+  public static let unixgramCompatOffload: UInt32 =
+    (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14)
 }
 
 public enum KrunNetworkBackend: String, Codable, Sendable, Equatable {

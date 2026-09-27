@@ -100,7 +100,7 @@ if not vmnet_backends_task.is_file():
 vmnet_backends_task_text = vmnet_backends_task.read_text()
 for required in (
     "--runtime-a-label krun-native-vmnet",
-    "--runtime-b-label krun-vmnet-helper-no-offload",
+    "--runtime-b-label krun-vmnet-helper-offload",
     "--runtime-a-backend native",
     "--runtime-b-backend vmnet-helper",
     ".vmnet-helper-control",
@@ -455,8 +455,10 @@ vmnet_backend = (ROOT / "Sources/KrunRuntimeCore/KrunVMNetBackend.swift").read_t
 for required in (
     'attachment.variant == "allocationOnly"',
     ".vmnetHelperControl",
-    '"offload": "disabled"',
-    "features: 0",
+    '"--enable-tso"',
+    '"--enable-checksum-offload"',
+    '"offload": "krunkit-unixgram-compat"',
+    "features: KrunNetworkFeatures.unixgramCompatOffload",
     "ipv4Gateway: attachment.ipv4Gateway.description",
     "macAddress: macAddress.bytes",
 ):
@@ -464,8 +466,6 @@ for required in (
         print(f"vmnet backend is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 for forbidden in (
-    '"--enable-tso"',
-    '"--enable-checksum-offload"',
     "vmnet_network_create_with_serialization",
     "vmnet_interface_start_with_network(",
     "vmnet_read(",
