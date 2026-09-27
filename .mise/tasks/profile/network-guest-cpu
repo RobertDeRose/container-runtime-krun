@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description="Profile guest per-vCPU and network softirq load during native-vmnet sustained P8 TX"
+#USAGE flag "--network <network>" help="Apple Container network" default="default"
+#USAGE flag "--image <image>" help="Python image used for benchmark endpoint" default="python:3.13-alpine"
+#USAGE flag "--streams <streams>" help="Parallel guest-to-host TCP streams" default="8"
+#USAGE flag "--cpus <cpus>" help="Guest vCPUs" default="8"
+#USAGE flag "--seconds <seconds>" help="Sustained duration per recorded sample" default="20"
+#USAGE flag "--warmup-seconds <seconds>" help="Warmup duration" default="2"
+#USAGE flag "--iterations <iterations>" help="Profiled samples" default="3"
+#USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
+#USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
+#USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
+
+set -euo pipefail
+
+exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/profile_network_guest_cpu.py" \
+  --network "${usage_network?}" \
+  --image "${usage_image?}" \
+  --streams "${usage_streams?}" \
+  --cpus "${usage_cpus?}" \
+  --seconds "${usage_seconds?}" \
+  --warmup-seconds "${usage_warmup_seconds?}" \
+  --iterations "${usage_iterations?}" \
+  --chunk-kib "${usage_chunk_kib?}" \
+  --timeout "${usage_timeout?}" \
+  --result-root "${usage_result_root?}"

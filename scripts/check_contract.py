@@ -93,6 +93,30 @@ for required in (
         print(f"network stream profiler contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 
+guest_cpu_profile_task = ROOT / ".mise/tasks/profile/network-guest-cpu"
+if not guest_cpu_profile_task.is_file():
+    print("profile:network-guest-cpu must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+guest_cpu_profile_task_text = guest_cpu_profile_task.read_text()
+for required in (
+    'default="8"',
+    'profile_network_guest_cpu.py',
+):
+    if required not in guest_cpu_profile_task_text:
+        print(f"profile:network-guest-cpu contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+guest_cpu_profile_script = (ROOT / "scripts/profile_network_guest_cpu.py").read_text()
+for required in (
+    '"/proc/stat"',
+    '"/proc/softirqs"',
+    '"/proc/net/softnet_stat"',
+    'SinkServer(endpoint.gateway)',
+):
+    if required not in guest_cpu_profile_script:
+        print(f"guest CPU profiler contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 vmnet_backends_task = ROOT / ".mise/tasks/benchmark/vmnet-backends"
 if not vmnet_backends_task.is_file():
     print("benchmark:vmnet-backends must be a mise file task", file=sys.stderr)
