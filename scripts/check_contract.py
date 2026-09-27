@@ -117,6 +117,30 @@ for required in (
         print(f"guest CPU profiler contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 
+guest_cpu_compare_task = ROOT / ".mise/tasks/profile/network-guest-cpu-compare"
+if not guest_cpu_compare_task.is_file():
+    print("profile:network-guest-cpu-compare must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+guest_cpu_compare_task_text = guest_cpu_compare_task.read_text()
+for required in (
+    'default="8"',
+    'profile_network_guest_cpu_compare.py',
+):
+    if required not in guest_cpu_compare_task_text:
+        print(f"profile:network-guest-cpu-compare contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+guest_cpu_compare_script = (ROOT / "scripts/profile_network_guest_cpu_compare.py").read_text()
+for required in (
+    'default="container-runtime-linux"',
+    'default="container-runtime-krun"',
+    'guest_profile.guest_snapshot',
+    '"guest-cpu-comparison.json"',
+):
+    if required not in guest_cpu_compare_script:
+        print(f"guest CPU comparison profiler contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 vmnet_backends_task = ROOT / ".mise/tasks/benchmark/vmnet-backends"
 if not vmnet_backends_task.is_file():
     print("benchmark:vmnet-backends must be a mise file task", file=sys.stderr)
