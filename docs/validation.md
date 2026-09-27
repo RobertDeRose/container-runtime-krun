@@ -362,3 +362,46 @@ mise run validate:runtime-dial
 ```
 
 The validator starts a real guest AF_VSOCK listener, calls the pinned Apple `RuntimeClient.dial(_:)` API, verifies bidirectional bytes across repeated connections, verifies an unused-port failure and a successful dial afterward, checks that the container remains usable, and verifies stop/delete helper cleanup. Results are packaged as `validation-results/container-runtime-krun-runtime-dial-*.tar.gz`.
+
+
+## Sustained network benchmark failure evidence
+
+The sustained network benchmark and guest CPU comparison share the same
+`benchmark_network_streams.py` endpoint and command helpers. A guest `READY` log
+only confirms that its local sink is listening; it does not prove that the guest
+can reach the host gateway. The gateway comes from `container inspect`, not a
+hard-coded subnet.
+
+Successful endpoint inspection is saved as `<container-id>-inspect.txt`. If a
+guest-to-host transfer fails, its original command log is retained and read-only
+network diagnostics are collected before the host listener closes and before
+container cleanup:
+
+- `<sample-label>-network.json`: endpoint addresses and the actual TCP target;
+- `<sample-label>-network-guest.txt`: guest addresses, routes, route lookup,
+  neighbor/ARP state, and interface counters;
+- `<sample-label>-network-host-*.txt`: host interfaces, routes, neighbors, the
+  route to the guest, and the host TCP listener;
+- `<sample-label>-network-inspect.txt` and `*-guest-logs.txt`: container state
+  and guest logs at failure time.
+
+Each diagnostic command has a ten-second timeout. Missing tools and diagnostic
+failures are recorded without replacing the original transfer failure. The
+failed transfer is not retried, and no routes, firewall settings, network
+resources, runtime binaries, or libkrun settings are changed.
+
+Cleanup saves stdout, stderr, and exit status in `<container-id>-delete.txt`.
+Timeouts retain partial output; `cleanup-errors.txt` remains the cleanup summary.
+A failed warm-up or cleanup still fails the run. An empty profile array means
+that no completed profile was recorded, not that interrupt activity was zero.
+
+For a failed guest CPU comparison, apply diagnostic-only script changes without
+reinstalling the runtime, then run:
+
+```bash
+mise run profile:network-guest-cpu-compare --streams 8 --seconds 20 --iterations 3
+```
+
+Inspect the resulting archive before changing the RX notification experiment or
+repeating the full throughput benchmark. If Apple/VZ fails before krun is
+created, that run cannot measure the libkrun change.

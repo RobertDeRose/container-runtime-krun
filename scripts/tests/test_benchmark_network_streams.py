@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "benchmark_network_streams.py"
@@ -143,6 +144,161 @@ class CleanupTests(unittest.TestCase):
                 self.assertIn("delete --force timed out", cleanup_errors)
         finally:
             network_streams.subprocess.run = original
+
+
+class FailureEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.output = pathlib.Path(self.temp.name)
+        self.bench = network_streams.Benchmark(self.output, timeout=5)
+        self.endpoint = network_streams.Endpoint(
+            "apple-vz", "test-r1", "192.0.2.2", "192.0.2.1", 54321,
+        )
+
+    def test_run_records_stderr_before_raising(self):
+        command = [sys.executable, "-c", "import sys; print('failure', file=sys.stderr); sys.exit(7)"]
+        with self.assertRaisesRegex(RuntimeError, "failed with exit 7"):
+            self.bench.run("failed-command", command)
+        evidence = (self.output / "failed-command.txt").read_text()
+        self.assertIn("failure", evidence)
+        self.assertIn("exit_status=7", evidence)
+
+    def test_timeout_keeps_partial_output_and_original_exception(self):
+        for stdout, stderr in ((b"partial out", b"partial err\xff"), ("out", "err"), (None, None)):
+            with self.subTest(stdout=stdout):
+                error = network_streams.subprocess.TimeoutExpired(
+                    ["container", "inspect", "test-r1"], 5, output=stdout, stderr=stderr,
+                )
+                with mock.patch.object(network_streams.subprocess, "run", side_effect=error):
+                    with self.assertRaises(network_streams.subprocess.TimeoutExpired) as caught:
+                        self.bench.run("timed-out", error.cmd)
+                self.assertIs(caught.exception, error)
+                evidence = (self.output / "timed-out.txt").read_text()
+                self.assertIn("timeout_seconds=5", evidence)
+                if stdout is not None:
+                    expected = stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout
+                    self.assertIn(expected, evidence)
+                if stderr is not None:
+                    expected = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
+                    self.assertIn(expected, evidence)
+
+    def test_cleanup_failure_keeps_stderr_and_container(self):
+        self.bench.active_containers.add("test-r1")
+        result = network_streams.subprocess.CompletedProcess([], 1, "", "failed to stop runtime\n")
+        with mock.patch.object(network_streams.subprocess, "run", return_value=result) as run:
+            self.bench.cleanup()
+        self.assertTrue(self.bench.failed)
+        self.assertIn("test-r1", self.bench.active_containers)
+        evidence = (self.output / "test-r1-delete.txt").read_text()
+        self.assertIn("failed to stop runtime", evidence)
+        self.assertIn("exit_status=1", evidence)
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
+
+    def test_cleanup_timeout_keeps_partial_stderr(self):
+        self.bench.active_containers.add("test-r1")
+        error = network_streams.subprocess.TimeoutExpired([], 30, stderr=b"waiting for runtime")
+        with mock.patch.object(network_streams.subprocess, "run", side_effect=error):
+            self.bench.cleanup()
+        self.assertTrue(self.bench.failed)
+        self.assertIn("waiting for runtime", (self.output / "test-r1-delete.txt").read_text())
+        self.assertIn("test-r1", self.bench.active_containers)
+
+    def test_cleanup_launch_error_is_archived(self):
+        self.bench.active_containers.add("test-r1")
+        with mock.patch.object(network_streams.subprocess, "run", side_effect=FileNotFoundError("container")):
+            self.bench.cleanup()
+        self.assertTrue(self.bench.failed)
+        self.assertIn("launch_error=", (self.output / "test-r1-delete.txt").read_text())
+        self.assertIn("could not run", (self.output / "cleanup-errors.txt").read_text())
+
+    def test_successful_cleanup_removes_container_and_keeps_output(self):
+        self.bench.active_containers.add("test-r1")
+        result = network_streams.subprocess.CompletedProcess([], 0, "test-r1\n", "")
+        with mock.patch.object(network_streams.subprocess, "run", return_value=result):
+            self.bench.cleanup()
+        self.assertFalse(self.bench.failed)
+        self.assertFalse(self.bench.active_containers)
+        self.assertIn("exit_status=0", (self.output / "test-r1-delete.txt").read_text())
+        self.assertFalse((self.output / "cleanup-errors.txt").exists())
+
+    def test_inspect_preserves_the_attachment_that_selected_the_gateway(self):
+        payload = '[{"status":{"networks":[{"ipv4Address":"192.0.2.2/24","ipv4Gateway":"192.0.2.1"}]}}]'
+        result = network_streams.subprocess.CompletedProcess([], 0, payload, "")
+        with mock.patch.object(network_streams.subprocess, "run", return_value=result):
+            addresses = network_streams.inspect_endpoint(self.bench, "test-r1")
+        self.assertEqual(addresses, ("192.0.2.2", "192.0.2.1"))
+        self.assertEqual((self.output / "test-r1-inspect.txt").read_text(), payload)
+
+    def test_failure_capture_continues_after_missing_diagnostic_tool(self):
+        calls = []
+
+        def run(label, command, **kwargs):
+            calls.append((label, command, kwargs))
+            if len(calls) == 1:
+                raise FileNotFoundError("container")
+            return network_streams.subprocess.CompletedProcess(command, 1, "", "unavailable")
+
+        with mock.patch.object(self.bench, "run", side_effect=run):
+            network_streams.capture_guest_network_failure(
+                self.bench, self.endpoint, "192.0.2.1", 54322, "warmup",
+            )
+        self.assertEqual(len(calls), 8)
+        self.assertTrue(all(call[2] == {"check": False, "timeout": 10} for call in calls))
+        payload = network_streams.json.loads((self.output / "warmup-network.json").read_text())
+        self.assertEqual(payload["target_port"], 54322)
+        self.assertEqual(payload["endpoint"]["guest_ip"], "192.0.2.2")
+        guest = calls[1][1]
+        self.assertEqual(guest[-1], "192.0.2.1")
+        self.assertIn('ip -4 route get "$1"', guest[5])
+        self.assertIn("ip neigh show", guest[5])
+        self.assertEqual(calls[4][1], ["/sbin/route", "-n", "get", "192.0.2.2"])
+        self.assertIn("-iTCP:54322", calls[6][1])
+
+    def test_transfer_failure_is_not_retried_or_replaced_by_diagnostic_failure(self):
+        original = RuntimeError("warmup failed with exit 1")
+        with mock.patch.object(self.bench, "run", side_effect=original) as run:
+            with mock.patch.object(
+                network_streams, "capture_guest_network_failure", side_effect=OSError("diagnostic failed"),
+            ) as capture:
+                with self.assertRaises(RuntimeError) as caught:
+                    network_streams.guest_source(
+                        self.bench, self.endpoint, "192.0.2.1", 54322, 8, 2.0, 262144, "warmup",
+                    )
+        self.assertIs(caught.exception, original)
+        run.assert_called_once()
+        capture.assert_called_once_with(self.bench, self.endpoint, "192.0.2.1", 54322, "warmup")
+        self.assertEqual(self.bench.samples, [])
+
+    def test_successful_transfer_does_not_collect_failure_diagnostics(self):
+        result = network_streams.subprocess.CompletedProcess([], 0, '{"bytes": 1024}\n', "")
+        with mock.patch.object(self.bench, "run", return_value=result):
+            with mock.patch.object(network_streams, "capture_guest_network_failure") as capture:
+                measured = network_streams.guest_source(
+                    self.bench, self.endpoint, "192.0.2.1", 54322, 8, 2.0, 262144, "warmup",
+                )
+        self.assertEqual(measured, {"bytes": 1024})
+        capture.assert_not_called()
+
+    def test_capture_runs_while_the_host_sink_is_still_listening(self):
+        original = RuntimeError("warmup failed")
+        observed = []
+
+        def capture(bench, endpoint, host, port, label):
+            with network_streams.socket.create_connection((host, port), timeout=2) as connection:
+                connection.sendall(network_streams.STREAM_TRAILER_MAGIC + network_streams.struct.pack("!Q", 0))
+                observed.append(network_streams.recv_exact(connection, 8))
+
+        with network_streams.SinkServer("127.0.0.1") as sink:
+            with mock.patch.object(self.bench, "run", side_effect=original):
+                with mock.patch.object(network_streams, "capture_guest_network_failure", side_effect=capture):
+                    with self.assertRaises(RuntimeError) as caught:
+                        network_streams.guest_source(
+                            self.bench, self.endpoint, "127.0.0.1", sink.port, 8, 2.0, 262144, "warmup",
+                        )
+        self.assertIs(caught.exception, original)
+        self.assertEqual(observed, [network_streams.struct.pack("!Q", 0)])
 
 
 class SummaryTests(unittest.TestCase):

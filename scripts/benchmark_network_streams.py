@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import platform
+import shlex
 import socket
 import statistics
 import struct
@@ -265,16 +266,35 @@ class Benchmark:
         check: bool = True,
         timeout: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        self.log(f"RUN {label}: {' '.join(argv)}")
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout or self.timeout,
-            check=False,
-        )
-        (self.output / f"{label}.txt").write_text(
-            f"$ {' '.join(argv)}\n{result.stdout}{result.stderr}\nexit_status={result.returncode}\n",
+        command = shlex.join(argv)
+        self.log(f"RUN {label}: {command}")
+        log_path = self.output / f"{label}.txt"
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout or self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            # TimeoutExpired can carry bytes even when text=True.
+            stdout = error.stdout or ""
+            stderr = error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            log_path.write_text(
+                f"$ {command}\n{stdout}{stderr}\ntimeout_seconds={error.timeout}\n",
+                encoding="utf-8",
+            )
+            raise
+        except OSError as error:
+            log_path.write_text(f"$ {command}\nlaunch_error={error!r}\n", encoding="utf-8")
+            raise
+        log_path.write_text(
+            f"$ {command}\n{result.stdout}{result.stderr}\nexit_status={result.returncode}\n",
             encoding="utf-8",
         )
         if check and result.returncode != 0:
@@ -285,15 +305,17 @@ class Benchmark:
         cleanup_errors: list[str] = []
         for container_id in list(self.active_containers):
             try:
-                result = subprocess.run(
+                result = self.run(
+                    f"{container_id}-delete",
                     ["container", "delete", "--force", container_id],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
                     timeout=30,
                     check=False,
                 )
             except subprocess.TimeoutExpired:
                 cleanup_errors.append(f"{container_id}: delete --force timed out after 30 seconds")
+                continue
+            except OSError as error:
+                cleanup_errors.append(f"{container_id}: delete --force could not run: {error}")
                 continue
             if result.returncode != 0:
                 cleanup_errors.append(
@@ -436,6 +458,7 @@ def inspect_endpoint(bench: Benchmark, container_id: str) -> tuple[str, str]:
                     first = attachments[0]
                     guest_ip = str(ipaddress.IPv4Interface(first["ipv4Address"]).ip)
                     gateway = str(ipaddress.IPv4Address(first["ipv4Gateway"]))
+                    (bench.output / f"{container_id}-inspect.txt").write_text(last, encoding="utf-8")
                     return guest_ip, gateway
             except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -508,6 +531,50 @@ def configure_runtime_backend(marker: Path | None, backend: str) -> None:
         return
     raise ValueError(f"unsupported runtime backend {backend}")
 
+def capture_guest_network_failure(
+    bench: Benchmark,
+    endpoint: Endpoint,
+    host: str,
+    port: int,
+    label: str,
+) -> None:
+    """Capture read-only evidence before the host listener and guest are removed."""
+    prefix = f"{label}-network"
+    (bench.output / f"{prefix}.json").write_text(
+        json.dumps(
+            {"endpoint": asdict(endpoint), "target_host": host, "target_port": port},
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    guest_commands = (
+        'set -x\n'
+        'ip -4 address show\n'
+        'ip -4 route show\n'
+        'ip -4 route get "$1"\n'
+        'ip neigh show\n'
+        'cat /proc/net/arp\n'
+        'cat /proc/net/dev\n'
+    )
+    commands = [
+        ("inspect", ["container", "inspect", endpoint.container_id]),
+        ("guest", ["container", "exec", endpoint.container_id,
+                   "sh", "-c", guest_commands, "network-diagnostics", host]),
+        ("host-interfaces", ["/sbin/ifconfig", "-a"]),
+        ("host-routes", ["/usr/sbin/netstat", "-rn", "-f", "inet"]),
+        ("host-route-to-guest", ["/sbin/route", "-n", "get", endpoint.guest_ip]),
+        ("host-neighbors", ["/usr/sbin/arp", "-an"]),
+        ("host-listener", ["/usr/sbin/lsof", "-nP", "-a", f"-iTCP:{port}", "-sTCP:LISTEN"]),
+        ("guest-logs", ["container", "logs", endpoint.container_id]),
+    ]
+    for suffix, command in commands:
+        try:
+            bench.run(f"{prefix}-{suffix}", command, check=False, timeout=10)
+        except Exception as error:
+            # A missing tool or unresponsive guest must not hide the transfer failure.
+            bench.log(f"network diagnostic {suffix} failed: {error}")
+
+
 def guest_source(
     bench: Benchmark,
     endpoint: Endpoint,
@@ -518,16 +585,24 @@ def guest_source(
     chunk_bytes: int,
     label: str,
 ) -> dict[str, object]:
-    result = bench.run(
-        label,
-        [
-            "container", "exec", endpoint.container_id,
-            "python3", "-c", GUEST_SOURCE,
-            host, str(port), str(streams), str(seconds), str(chunk_bytes),
-        ],
-        timeout=max(bench.timeout, int(seconds) + 60),
-    )
-    return parse_json_line(result.stdout)
+    try:
+        result = bench.run(
+            label,
+            [
+                "container", "exec", endpoint.container_id,
+                "python3", "-c", GUEST_SOURCE,
+                host, str(port), str(streams), str(seconds), str(chunk_bytes),
+            ],
+            timeout=max(bench.timeout, int(seconds) + 60),
+        )
+        return parse_json_line(result.stdout)
+    except Exception:
+        bench.log(f"capturing network evidence for {label}; the transfer will not be retried")
+        try:
+            capture_guest_network_failure(bench, endpoint, host, port, label)
+        except Exception as error:
+            bench.log(f"network evidence capture failed: {error}")
+        raise
 
 
 def run_direction(
