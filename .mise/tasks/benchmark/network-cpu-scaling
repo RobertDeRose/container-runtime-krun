@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#MISE description="Compare native vmnet sustained throughput with 2 vs 8 guest vCPUs"
+#USAGE flag "--network <network>" help="Apple Container network" default="default"
+#USAGE flag "--image <image>" help="Python image used for benchmark endpoints" default="python:3.13-alpine"
+#USAGE flag "--streams <streams>" help="Comma-separated parallel stream counts" default="8"
+#USAGE flag "--seconds <seconds>" help="Sustained duration per recorded sample" default="20"
+#USAGE flag "--warmup-seconds <seconds>" help="Warmup duration per endpoint/direction" default="2"
+#USAGE flag "--iterations <iterations>" help="Paired A/B -> B/A samples per direction" default="6"
+#USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
+#USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
+#USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
+
+set -euo pipefail
+
+install_root="${INSTALL_ROOT:-$(python3 "$MISE_PROJECT_ROOT/scripts/install_root.py" 2>/dev/null || true)}"
+[[ -n "$install_root" ]] || {
+  echo "Unable to derive INSTALL_ROOT; pass INSTALL_ROOT=/path/to/container prefix" >&2
+  exit 1
+}
+plugin_bin="$install_root/libexec/container-plugins/container-runtime-krun/bin"
+marker="$plugin_bin/.vmnet-helper-control"
+
+cleanup() {
+  rm -f "$marker"
+}
+trap cleanup EXIT INT TERM
+cleanup
+
+/usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/benchmark_network_streams.py" \
+  --runtime-a container-runtime-krun \
+  --runtime-a-label krun-native-cpu2 \
+  --runtime-a-backend native \
+  --runtime-a-cpus 2 \
+  --runtime-b container-runtime-krun \
+  --runtime-b-label krun-native-cpu8 \
+  --runtime-b-backend native \
+  --runtime-b-cpus 8 \
+  --control-marker "$marker" \
+  --network "${usage_network?}" \
+  --image "${usage_image?}" \
+  --streams "${usage_streams?}" \
+  --seconds "${usage_seconds?}" \
+  --warmup-seconds "${usage_warmup_seconds?}" \
+  --iterations "${usage_iterations?}" \
+  --chunk-kib "${usage_chunk_kib?}" \
+  --timeout "${usage_timeout?}" \
+  --result-root "${usage_result_root?}"

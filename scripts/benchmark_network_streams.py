@@ -471,20 +471,23 @@ def start_endpoint(
     network: str,
     prefix: str,
     slot: int,
+    cpus: int | None = None,
 ) -> Endpoint:
     key = "".join(ch if ch.isalnum() else "-" for ch in label)
     container_id = f"{prefix}-r{slot}"
     published_port = free_tcp_port()
     bench.active_containers.add(container_id)
-    bench.run(
-        f"{key}-start",
-        [
-            "container", "run", "-d", "--name", container_id,
-            "--runtime", runtime, "--network", network,
-            "--publish", f"127.0.0.1:{published_port}:{GUEST_SINK_PORT}/tcp",
-            image, "python3", "-u", "-c", GUEST_SINK_SERVER, str(GUEST_SINK_PORT),
-        ],
-    )
+    command = [
+        "container", "run", "-d", "--name", container_id,
+        "--runtime", runtime, "--network", network,
+    ]
+    if cpus is not None:
+        command.extend(["--cpus", str(cpus)])
+    command.extend([
+        "--publish", f"127.0.0.1:{published_port}:{GUEST_SINK_PORT}/tcp",
+        image, "python3", "-u", "-c", GUEST_SINK_SERVER, str(GUEST_SINK_PORT),
+    ])
+    bench.run(f"{key}-start", command)
     wait_ready(bench, container_id)
     guest_ip, gateway = inspect_endpoint(bench, container_id)
     return Endpoint(label, container_id, guest_ip, gateway, published_port)
@@ -748,6 +751,8 @@ def main() -> int:
     parser.add_argument("--runtime-b", default="container-runtime-krun")
     parser.add_argument("--runtime-a-label")
     parser.add_argument("--runtime-b-label")
+    parser.add_argument("--runtime-a-cpus", type=int)
+    parser.add_argument("--runtime-b-cpus", type=int)
     parser.add_argument(
         "--runtime-a-backend", choices=("default", "native", "vmnet-helper"), default="default"
     )
@@ -768,6 +773,10 @@ def main() -> int:
 
     if args.seconds <= 0 or args.warmup_seconds <= 0 or args.iterations <= 0 or args.chunk_kib <= 0:
         parser.error("seconds, warmup-seconds, iterations, and chunk-kib must be positive")
+    if args.runtime_a_cpus is not None and args.runtime_a_cpus <= 0:
+        parser.error("runtime-a-cpus must be positive")
+    if args.runtime_b_cpus is not None and args.runtime_b_cpus <= 0:
+        parser.error("runtime-b-cpus must be positive")
 
     runtime_a_label = args.runtime_a_label or args.runtime_a
     runtime_b_label = args.runtime_b_label or args.runtime_b
@@ -789,9 +798,11 @@ def main() -> int:
         "runtime_a": args.runtime_a,
         "runtime_a_label": runtime_a_label,
         "runtime_a_backend": args.runtime_a_backend,
+        "runtime_a_cpus": args.runtime_a_cpus,
         "runtime_b": args.runtime_b,
         "runtime_b_label": runtime_b_label,
         "runtime_b_backend": args.runtime_b_backend,
+        "runtime_b_cpus": args.runtime_b_cpus,
         "control_marker": str(args.control_marker) if args.control_marker else None,
         "network": args.network,
         "image": args.image,
@@ -811,13 +822,13 @@ def main() -> int:
 
     try:
         runtime_specs = (
-            (args.runtime_a, runtime_a_label, args.runtime_a_backend),
-            (args.runtime_b, runtime_b_label, args.runtime_b_backend),
+            (args.runtime_a, runtime_a_label, args.runtime_a_backend, args.runtime_a_cpus),
+            (args.runtime_b, runtime_b_label, args.runtime_b_backend, args.runtime_b_cpus),
         )
-        for slot, (runtime, label, backend) in enumerate(runtime_specs, start=1):
+        for slot, (runtime, label, backend, cpus) in enumerate(runtime_specs, start=1):
             configure_runtime_backend(args.control_marker, backend)
             endpoints.append(
-                start_endpoint(bench, runtime, label, args.image, args.network, prefix, slot)
+                start_endpoint(bench, runtime, label, args.image, args.network, prefix, slot, cpus)
             )
         if args.control_marker is not None:
             args.control_marker.unlink(missing_ok=True)
