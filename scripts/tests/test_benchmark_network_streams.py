@@ -26,6 +26,48 @@ class StreamParsingTests(unittest.TestCase):
                     network_streams.parse_streams(value)
 
 
+class EndpointNamingTests(unittest.TestCase):
+    def test_runtime_labels_do_not_expand_container_ids(self):
+        original_run = network_streams.Benchmark.run
+        original_wait_ready = network_streams.wait_ready
+        original_inspect_endpoint = network_streams.inspect_endpoint
+        original_free_tcp_port = network_streams.free_tcp_port
+        seen: list[str] = []
+
+        def fake_run(bench, label, command, **kwargs):
+            seen.append(command[command.index("--name") + 1])
+            return type("Result", (), {"stdout": "", "stderr": "", "returncode": 0})()
+
+        try:
+            network_streams.Benchmark.run = fake_run
+            network_streams.wait_ready = lambda _bench, _container_id: None
+            network_streams.inspect_endpoint = lambda _bench, _container_id: (
+                "192.0.2.2",
+                "192.0.2.1",
+            )
+            network_streams.free_tcp_port = lambda: 54321
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bench = network_streams.Benchmark(pathlib.Path(temp_dir), timeout=5)
+                endpoint = network_streams.start_endpoint(
+                    bench,
+                    "container-runtime-krun",
+                    "krun-vmnet-helper-no-offload",
+                    "python:3.13-alpine",
+                    "default",
+                    "krun-streams-20260927t022723z-70871",
+                    2,
+                )
+        finally:
+            network_streams.Benchmark.run = original_run
+            network_streams.wait_ready = original_wait_ready
+            network_streams.inspect_endpoint = original_inspect_endpoint
+            network_streams.free_tcp_port = original_free_tcp_port
+
+        self.assertEqual(endpoint.container_id, "krun-streams-20260927t022723z-70871-r2")
+        self.assertEqual(seen, [endpoint.container_id])
+        self.assertLessEqual(len(endpoint.container_id), 63)
+
+
 class BackendSelectionTests(unittest.TestCase):
     def test_configure_runtime_backend_toggles_marker(self):
         with tempfile.TemporaryDirectory() as temp_dir:

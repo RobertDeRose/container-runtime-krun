@@ -464,10 +464,16 @@ def wait_ready(bench: Benchmark, container_id: str) -> None:
 
 
 def start_endpoint(
-    bench: Benchmark, runtime: str, label: str, image: str, network: str, prefix: str
+    bench: Benchmark,
+    runtime: str,
+    label: str,
+    image: str,
+    network: str,
+    prefix: str,
+    slot: int,
 ) -> Endpoint:
     key = "".join(ch if ch.isalnum() else "-" for ch in label)
-    container_id = f"{prefix}-{key}"
+    container_id = f"{prefix}-r{slot}"
     published_port = free_tcp_port()
     bench.active_containers.add(container_id)
     bench.run(
@@ -808,9 +814,11 @@ def main() -> int:
             (args.runtime_a, runtime_a_label, args.runtime_a_backend),
             (args.runtime_b, runtime_b_label, args.runtime_b_backend),
         )
-        for runtime, label, backend in runtime_specs:
+        for slot, (runtime, label, backend) in enumerate(runtime_specs, start=1):
             configure_runtime_backend(args.control_marker, backend)
-            endpoints.append(start_endpoint(bench, runtime, label, args.image, args.network, prefix))
+            endpoints.append(
+                start_endpoint(bench, runtime, label, args.image, args.network, prefix, slot)
+            )
         if args.control_marker is not None:
             args.control_marker.unlink(missing_ok=True)
 
