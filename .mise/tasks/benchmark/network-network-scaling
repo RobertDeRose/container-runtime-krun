@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#MISE description="Compare dual-VM native krun throughput on one vmnet network vs two separate networks"
+#USAGE flag "--network <network>" help="Existing Apple Container network used by the same-network pair" default="default"
+#USAGE flag "--subnet-a <subnet>" help="Temporary subnet for separate-network VM A" default="172.29.250.0/24"
+#USAGE flag "--subnet-b <subnet>" help="Temporary subnet for separate-network VM B" default="172.29.251.0/24"
+#USAGE flag "--image <image>" help="Python image used for benchmark endpoints" default="python:3.13-alpine"
+#USAGE flag "--streams <streams>" help="Total stream count; must be even" default="8"
+#USAGE flag "--cpus <cpus>" help="vCPUs per krun VM" default="2"
+#USAGE flag "--seconds <seconds>" help="Sustained duration per recorded sample" default="20"
+#USAGE flag "--warmup-seconds <seconds>" help="Warmup duration per topology" default="2"
+#USAGE flag "--iterations <iterations>" help="Paired same/separate -> separate/same samples" default="6"
+#USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
+#USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
+#USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
+
+set -euo pipefail
+
+exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/benchmark_network_network_scaling.py" \
+  --network "${usage_network?}" \
+  --subnet-a "${usage_subnet_a?}" \
+  --subnet-b "${usage_subnet_b?}" \
+  --image "${usage_image?}" \
+  --streams "${usage_streams?}" \
+  --cpus "${usage_cpus?}" \
+  --seconds "${usage_seconds?}" \
+  --warmup-seconds "${usage_warmup_seconds?}" \
+  --iterations "${usage_iterations?}" \
+  --chunk-kib "${usage_chunk_kib?}" \
+  --timeout "${usage_timeout?}" \
+  --result-root "${usage_result_root?}"
