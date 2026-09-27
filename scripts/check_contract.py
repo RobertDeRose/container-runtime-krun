@@ -109,6 +109,30 @@ for required in (
         print(f"benchmark:vmnet-backends contract is missing {required}", file=sys.stderr)
         raise SystemExit(1)
 
+network_worker_scaling_task = ROOT / ".mise/tasks/benchmark/network-worker-scaling"
+if not network_worker_scaling_task.is_file():
+    print("benchmark:network-worker-scaling must be a mise file task", file=sys.stderr)
+    raise SystemExit(1)
+network_worker_scaling_task_text = network_worker_scaling_task.read_text()
+for required in (
+    'default="8"',
+    'default="2"',
+    'benchmark_network_worker_scaling.py',
+):
+    if required not in network_worker_scaling_task_text:
+        print(f"benchmark:network-worker-scaling contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+network_worker_scaling_script = (ROOT / "scripts/benchmark_network_worker_scaling.py").read_text()
+for required in (
+    'krun-native-one-vm-p8',
+    'krun-native-two-vm-p4x2',
+    'measure_group(',
+):
+    if required not in network_worker_scaling_script:
+        print(f"network worker scaling benchmark contract is missing {required}", file=sys.stderr)
+        raise SystemExit(1)
+
 network_stream_script = (ROOT / "scripts/benchmark_network_streams.py").read_text()
 for required in (
     '"guest_to_host"',
