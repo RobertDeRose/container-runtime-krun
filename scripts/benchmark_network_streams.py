@@ -282,15 +282,33 @@ class Benchmark:
         return result
 
     def cleanup(self) -> None:
+        cleanup_errors: list[str] = []
         for container_id in list(self.active_containers):
-            subprocess.run(
-                ["container", "delete", "--force", container_id],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-                check=False,
-            )
+            try:
+                result = subprocess.run(
+                    ["container", "delete", "--force", container_id],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                cleanup_errors.append(f"{container_id}: delete --force timed out after 30 seconds")
+                continue
+            if result.returncode != 0:
+                cleanup_errors.append(
+                    f"{container_id}: delete --force exited with {result.returncode}"
+                )
+                continue
             self.active_containers.discard(container_id)
+
+        if cleanup_errors:
+            self.failed = True
+            for error in cleanup_errors:
+                self.log(f"cleanup warning: {error}")
+            (self.output / "cleanup-errors.txt").write_text(
+                "\n".join(cleanup_errors) + "\n", encoding="utf-8"
+            )
 
     def record(self, sample: Sample) -> None:
         self.samples.append(sample)

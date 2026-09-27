@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Compare native vmnet against vmnet-helper using the same krun runtime/guest stack"
+#MISE description="Compare native vmnet against the legacy vmnet-helper baseline using the same krun runtime/guest stack"
 #USAGE flag "--network <network>" help="Apple Container network" default="default"
 #USAGE flag "--image <image>" help="Python image used for benchmark endpoints" default="python:3.13-alpine"
 #USAGE flag "--streams <streams>" help="Comma-separated parallel stream counts" default="1,4,8"
@@ -44,7 +44,7 @@ cleanup
   --runtime-a-label krun-native-vmnet \
   --runtime-a-backend native \
   --runtime-b container-runtime-krun \
-  --runtime-b-label krun-vmnet-helper \
+  --runtime-b-label krun-vmnet-helper-no-offload \
   --runtime-b-backend vmnet-helper \
   --control-marker "$marker" \
   --network "${usage_network?}" \

@@ -41,6 +41,27 @@ class BackendSelectionTests(unittest.TestCase):
 
 
 
+class CleanupTests(unittest.TestCase):
+    def test_cleanup_timeout_is_recorded_without_raising(self):
+        original = network_streams.subprocess.run
+
+        def timed_out(*args, **kwargs):
+            raise network_streams.subprocess.TimeoutExpired(args[0], 30)
+
+        try:
+            network_streams.subprocess.run = timed_out
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bench = network_streams.Benchmark(pathlib.Path(temp_dir), timeout=5)
+                bench.active_containers.add("stuck-container")
+                bench.cleanup()
+                self.assertTrue(bench.failed)
+                self.assertIn("stuck-container", bench.active_containers)
+                cleanup_errors = (pathlib.Path(temp_dir) / "cleanup-errors.txt").read_text()
+                self.assertIn("delete --force timed out", cleanup_errors)
+        finally:
+            network_streams.subprocess.run = original
+
+
 class SummaryTests(unittest.TestCase):
     def test_summary_groups_runtime_direction_and_parallelism(self):
         samples = [
