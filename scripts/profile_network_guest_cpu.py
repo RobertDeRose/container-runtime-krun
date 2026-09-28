@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import platform
-import shutil
 import statistics
 import tarfile
 from datetime import datetime, timezone
@@ -245,49 +244,6 @@ def interrupt_delta(before: str, after: str, eth0_device: str) -> list[dict[str,
     return rows[:20]
 
 
-INDIRECT_DESCRIPTOR_MARKERS = {
-    "rx": "LIBKRUN VIRTIO-NET: indirect descriptors active [queue=rx]",
-    "tx": "LIBKRUN VIRTIO-NET: indirect descriptors active [queue=tx]",
-}
-
-
-def capture_indirect_descriptor_evidence(
-    output: Path,
-    container_id: str,
-    app_root: Path | None = None,
-) -> dict[str, object]:
-    if app_root is None:
-        configured = os.environ.get("CONTAINER_APP_ROOT")
-        app_root = (
-            Path(configured)
-            if configured
-            else Path.home() / "Library/Application Support/com.apple.container"
-        )
-
-    source = app_root / "containers" / container_id / "krun-vmm.log"
-    destination = output / "krun-vmm.log"
-    evidence: dict[str, object] = {
-        "source": str(source),
-        "log_found": False,
-        "rx_observed": False,
-        "tx_observed": False,
-    }
-    try:
-        text = source.read_text(encoding="utf-8", errors="replace")
-        shutil.copyfile(source, destination)
-        evidence["log_found"] = True
-        evidence["rx_observed"] = INDIRECT_DESCRIPTOR_MARKERS["rx"] in text
-        evidence["tx_observed"] = INDIRECT_DESCRIPTOR_MARKERS["tx"] in text
-    except OSError as error:
-        evidence["error"] = repr(error)
-
-    (output / "indirect-descriptor-observation.json").write_text(
-        json.dumps(evidence, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return evidence
-
-
 def enabled_virtio_feature_bits(value: object) -> list[int]:
     if not isinstance(value, str):
         return []
@@ -421,7 +377,6 @@ def main() -> int:
     prefix = f"krun-gcpu-{token.lower()}"
     label = f"krun-native-guest-cpu{args.cpus}"
     rows: list[dict[str, object]] = []
-    endpoint: streams_bench.Endpoint | None = None
 
     (output / "metadata.json").write_text(
         json.dumps(
@@ -520,8 +475,6 @@ def main() -> int:
         (output / "fatal-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
     finally:
         write_profile_summary(output, rows)
-        if endpoint is not None:
-            capture_indirect_descriptor_evidence(output, endpoint.container_id)
         bench.cleanup()
         streams_bench.write_results(bench, label, "unused")
         with tarfile.open(archive, "w:gz") as tar:
