@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -52,6 +53,33 @@ class ProcParsingTests(unittest.TestCase):
     def test_enabled_virtio_feature_bits_decodes_sysfs_order(self):
         self.assertEqual(profile.enabled_virtio_feature_bits("101001\n"), [0, 2, 5])
         self.assertEqual(profile.enabled_virtio_feature_bits("ERROR: missing"), [])
+
+    def test_capture_indirect_descriptor_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            app_root = root / "app"
+            output = root / "output"
+            output.mkdir()
+            bundle = app_root / "containers" / "test-container"
+            bundle.mkdir(parents=True)
+            log_text = (
+                "startup\n"
+                + profile.INDIRECT_DESCRIPTOR_MARKERS["tx"]
+                + "\n"
+            )
+            (bundle / "krun-vmm.log").write_text(log_text, encoding="utf-8")
+
+            evidence = profile.capture_indirect_descriptor_evidence(
+                output,
+                "test-container",
+                app_root,
+            )
+
+            self.assertTrue(evidence["log_found"])
+            self.assertFalse(evidence["rx_observed"])
+            self.assertTrue(evidence["tx_observed"])
+            self.assertEqual((output / "krun-vmm.log").read_text(), log_text)
+            self.assertTrue((output / "indirect-descriptor-observation.json").is_file())
 
     def test_guest_snapshot_script_compiles(self):
         compile(profile.GUEST_SNAPSHOT, "<guest-snapshot>", "exec")
