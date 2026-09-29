@@ -65,13 +65,13 @@ class TxDatapathTests(unittest.TestCase):
             "container-krun-vmm-helper"
         )
         text = (
-            f"  41 /usr/bin/sudo -n -- {helper} '{config}'\n"
-            f"  42 {helper} '{config}'\n"
+            f"  41 /usr/bin/sudo -n -- {helper} {config}\n"
+            f"  42 {helper} {config}\n"
             "  43 python3 unrelated.py\n"
         )
         helpers = profile.parse_krun_helper_processes(text)
         self.assertEqual(set(helpers), {42})
-        self.assertEqual(helpers[42].config_path.name, "krun-vmm.json")
+        self.assertEqual(helpers[42].config_path, pathlib.Path(config))
         self.assertEqual(helpers[42].log_path.name, "krun-vmm.log")
         self.assertEqual(helpers[42].log_path.parent, helpers[42].config_path.parent)
 

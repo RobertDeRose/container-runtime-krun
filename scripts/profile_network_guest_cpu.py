@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import platform
-import shlex
 import signal
 import statistics
 import subprocess
@@ -267,17 +266,22 @@ def parse_krun_helper_processes(text: str) -> dict[int, KrunHelperProcess]:
             continue
         try:
             pid = int(pid_text)
-            argv = shlex.split(command.strip())
-        except (ValueError, OSError):
+        except ValueError:
             continue
+        command = command.strip()
+        executable, separator, config_text = command.partition(" ")
         # The runtime launches the VMM through ``sudo -n -- helper ...``.
         # The sudo wrapper therefore contains the helper name in its argv, but
         # signals must target the helper process itself.
-        if not argv or Path(argv[0]).name != "container-krun-vmm-helper":
+        if not separator or Path(executable).name != "container-krun-vmm-helper":
             continue
-        config = next((Path(argument) for argument in reversed(argv) if argument.endswith("krun-vmm.json")), None)
-        if config is None:
+        # macOS ps renders argv as whitespace-separated text without restoring
+        # quotes around an argument that contains spaces. The VMM helper accepts
+        # exactly one argument, so the entire remainder is the config path.
+        config_text = config_text.strip()
+        if not config_text.endswith("krun-vmm.json"):
             continue
+        config = Path(config_text)
         helpers[pid] = KrunHelperProcess(pid=pid, config_path=config, log_path=config.parent / "krun-vmm.log")
     return helpers
 
