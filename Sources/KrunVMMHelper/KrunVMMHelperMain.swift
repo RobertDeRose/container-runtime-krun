@@ -69,6 +69,9 @@ private final class KrunLibrary: @unchecked Sendable {
       UnsafePointer<CChar>?
     ) -> Int32
   typealias RequestVMMStop = @convention(c) (UInt32) -> Int32
+  typealias ResetNetTxStats = @convention(c) (UInt32, UInt32) -> Int32
+  typealias GetNetTxStatsJSON =
+    @convention(c) (UInt32, UInt32, UnsafeMutablePointer<CChar>?, UInt32) -> Int32
   typealias VsockConnect = @convention(c) (UInt32, UInt32) -> Int32
   typealias StartEnter = @convention(c) (UInt32) -> Int32
 
@@ -89,6 +92,8 @@ private final class KrunLibrary: @unchecked Sendable {
   let addConsole: AddConsole
   let setKernel: SetKernel
   let requestVMMStop: RequestVMMStop
+  let resetNetTxStats: ResetNetTxStats?
+  let getNetTxStatsJSON: GetNetTxStatsJSON?
   let vsockConnect: VsockConnect
   let startEnter: StartEnter
 
@@ -118,6 +123,10 @@ private final class KrunLibrary: @unchecked Sendable {
     self.addConsole = try Self.load(handle, "krun_add_virtio_console_default", as: AddConsole.self)
     self.setKernel = try Self.load(handle, "krun_set_kernel", as: SetKernel.self)
     self.requestVMMStop = try Self.load(handle, "krun_request_vmm_stop", as: RequestVMMStop.self)
+    self.resetNetTxStats = Self.loadOptional(
+      handle, "krun_debug_reset_net_tx_stats", as: ResetNetTxStats.self)
+    self.getNetTxStatsJSON = Self.loadOptional(
+      handle, "krun_debug_get_net_tx_stats_json", as: GetNetTxStatsJSON.self)
     self.vsockConnect = try Self.load(handle, "krun_vsock_connect", as: VsockConnect.self)
     self.startEnter = try Self.load(handle, "krun_start_enter", as: StartEnter.self)
   }
@@ -154,6 +163,59 @@ private func withCString<Result>(_ value: String, _ body: (UnsafePointer<CChar>)
   rethrows -> Result
 {
   try value.withCString(body)
+}
+
+private func writeTxDatapathLine(_ prefix: String, _ payload: String) {
+  FileHandle.standardError.write(Data("\(prefix) \(payload)\n".utf8))
+}
+
+private func resetTxDatapathStats(
+  krun: KrunLibrary, context: UInt32, networkCount: Int
+) {
+  guard let reset = krun.resetNetTxStats else {
+    writeTxDatapathLine(
+      "KRUN_TX_DATAPATH_ERROR",
+      #"{"operation":"reset","reason":"libkrun symbol unavailable"}"#
+    )
+    return
+  }
+  for index in 0..<networkCount {
+    let result = reset(context, UInt32(index))
+    writeTxDatapathLine(
+      "KRUN_TX_DATAPATH_RESET",
+      "{\"network_index\":\(index),\"result\":\(result)}"
+    )
+  }
+}
+
+private func emitTxDatapathStats(
+  krun: KrunLibrary, context: UInt32, networkCount: Int
+) {
+  guard let snapshot = krun.getNetTxStatsJSON else {
+    writeTxDatapathLine(
+      "KRUN_TX_DATAPATH_ERROR",
+      #"{"operation":"snapshot","reason":"libkrun symbol unavailable"}"#
+    )
+    return
+  }
+  for index in 0..<networkCount {
+    var buffer = [CChar](repeating: 0, count: 8 * 1024)
+    let result = buffer.withUnsafeMutableBufferPointer { bytes in
+      snapshot(context, UInt32(index), bytes.baseAddress, UInt32(bytes.count))
+    }
+    guard result == 0 else {
+      writeTxDatapathLine(
+        "KRUN_TX_DATAPATH_ERROR",
+        "{\"operation\":\"snapshot\",\"network_index\":\(index),\"result\":\(result)}"
+      )
+      continue
+    }
+    buffer.withUnsafeBufferPointer { bytes in
+      if let baseAddress = bytes.baseAddress {
+        writeTxDatapathLine("KRUN_TX_DATAPATH_STATS", String(cString: baseAddress))
+      }
+    }
+  }
 }
 
 private func serveControlChannel(
@@ -402,8 +464,30 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
     )
   }
   terminationSource.resume()
+
+  // Profiling is opt-in and signal-driven so normal VMM execution does not emit
+  // datapath logs. SIGUSR2 starts a fresh measurement window and SIGUSR1 emits
+  // one aggregate snapshot for each configured network.
+  signal(SIGUSR1, SIG_IGN)
+  signal(SIGUSR2, SIG_IGN)
+  let txStatsQueue = DispatchQueue(label: "com.github.robertderose.container-runtime-krun.tx-stats")
+  let txStatsSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: txStatsQueue)
+  txStatsSource.setEventHandler {
+    emitTxDatapathStats(krun: krun, context: context, networkCount: config.networks.count)
+  }
+  txStatsSource.resume()
+  let txStatsResetSource = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: txStatsQueue)
+  txStatsResetSource.setEventHandler {
+    resetTxDatapathStats(krun: krun, context: context, networkCount: config.networks.count)
+  }
+  txStatsResetSource.resume()
+
   defer {
+    txStatsResetSource.cancel()
+    txStatsSource.cancel()
     terminationSource.cancel()
+    signal(SIGUSR2, SIG_DFL)
+    signal(SIGUSR1, SIG_DFL)
     signal(SIGTERM, SIG_DFL)
   }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile guest CPU and softirq distribution during sustained native-vmnet TX."""
+"""Profile guest CPU, softirq, and aggregate TX datapath behavior during native-vmnet TX."""
 
 from __future__ import annotations
 
@@ -7,8 +7,13 @@ import argparse
 import json
 import os
 import platform
+import shlex
+import signal
 import statistics
+import subprocess
 import tarfile
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -244,6 +249,160 @@ def interrupt_delta(before: str, after: str, eth0_device: str) -> list[dict[str,
     return rows[:20]
 
 
+@dataclass(frozen=True)
+class KrunHelperProcess:
+    pid: int
+    config_path: Path
+    log_path: Path
+
+
+def parse_krun_helper_processes(text: str) -> dict[int, KrunHelperProcess]:
+    helpers: dict[int, KrunHelperProcess] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, separator, command = stripped.partition(" ")
+        if not separator:
+            continue
+        try:
+            pid = int(pid_text)
+            argv = shlex.split(command.strip())
+        except (ValueError, OSError):
+            continue
+        if not any(Path(argument).name == "container-krun-vmm-helper" for argument in argv):
+            continue
+        config = next((Path(argument) for argument in reversed(argv) if argument.endswith("krun-vmm.json")), None)
+        if config is None:
+            continue
+        helpers[pid] = KrunHelperProcess(pid=pid, config_path=config, log_path=config.parent / "krun-vmm.log")
+    return helpers
+
+
+def krun_helper_processes() -> dict[int, KrunHelperProcess]:
+    result = subprocess.run(
+        ["/bin/ps", "-ww", "-axo", "pid=,command="],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    return parse_krun_helper_processes(result.stdout)
+
+
+def find_new_krun_helper(
+    baseline_pids: set[int], container_id: str, timeout: float = 5.0
+) -> KrunHelperProcess:
+    deadline = time.monotonic() + timeout
+    last_new: list[KrunHelperProcess] = []
+    while time.monotonic() < deadline:
+        current = krun_helper_processes()
+        new = [helper for pid, helper in current.items() if pid not in baseline_pids]
+        matching = [helper for helper in new if container_id in str(helper.config_path)]
+        if len(matching) == 1:
+            return matching[0]
+        if len(new) == 1:
+            return new[0]
+        last_new = new
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"could not identify one new container-krun-vmm-helper for {container_id}: "
+        f"{[(helper.pid, str(helper.config_path)) for helper in last_new]}"
+    )
+
+
+def signal_tx_datapath(
+    helper: KrunHelperProcess, signum: int, prefix: str, timeout: float = 5.0
+) -> dict[str, object]:
+    try:
+        offset = helper.log_path.stat().st_size
+    except FileNotFoundError:
+        offset = 0
+    os.kill(helper.pid, signum)
+    deadline = time.monotonic() + timeout
+    pending = b""
+    with helper.log_path.open("rb") as stream:
+        stream.seek(offset)
+        while time.monotonic() < deadline:
+            chunk = stream.read()
+            if chunk:
+                pending += chunk
+                while b"\n" in pending:
+                    raw_line, pending = pending.split(b"\n", 1)
+                    line = raw_line.decode("utf-8", errors="replace")
+                    if line.startswith("KRUN_TX_DATAPATH_ERROR "):
+                        raise RuntimeError(line)
+                    marker = prefix + " "
+                    if line.startswith(marker):
+                        payload = json.loads(line[len(marker):])
+                        if not isinstance(payload, dict):
+                            raise RuntimeError(f"invalid {prefix} payload: {payload!r}")
+                        if int(payload.get("network_index", -1)) == 0:
+                            return payload
+            time.sleep(0.01)
+    raise RuntimeError(f"timed out waiting for {prefix} from helper PID {helper.pid}")
+
+
+def reset_tx_datapath(helper: KrunHelperProcess) -> None:
+    payload = signal_tx_datapath(helper, signal.SIGUSR2, "KRUN_TX_DATAPATH_RESET")
+    if int(payload.get("result", -1)) != 0:
+        raise RuntimeError(f"libkrun rejected TX datapath reset: {payload}")
+
+
+def snapshot_tx_datapath(helper: KrunHelperProcess) -> dict[str, object]:
+    return signal_tx_datapath(helper, signal.SIGUSR1, "KRUN_TX_DATAPATH_STATS")
+
+
+def _ratio(numerator: float, denominator: float) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def tx_datapath_derived(
+    counters: dict[str, object], result: dict[str, object], delta: dict[str, object]
+) -> dict[str, float | None]:
+    elapsed = float(result.get("elapsed_seconds", 0.0))
+    frames = float(counters.get("frames", 0))
+    datapath_bytes = float(counters.get("backend_bytes", counters.get("bytes", 0)))
+    kicks = float(counters.get("queue_notify_writes", 0))
+    wakeups = float(counters.get("eventfd_wakeups", 0))
+    drains = float(counters.get("drain_passes", 0))
+    chains = float(counters.get("descriptor_chains", 0))
+    descriptors = float(counters.get("descriptors", 0))
+    backend_calls = float(counters.get("write_frame_calls", 0))
+    flushes = float(counters.get("flush_calls", 0))
+    datapath_gib = datapath_bytes / (1024**3)
+
+    interrupts = delta.get("interrupts", [])
+    guest_irq = 0.0
+    if isinstance(interrupts, list):
+        guest_irq = float(
+            sum(
+                int(item.get("total", 0))
+                for item in interrupts
+                if isinstance(item, dict) and item.get("matches_eth0_device")
+            )
+        )
+
+    return {
+        "tx_kicks_per_second": _ratio(kicks, elapsed),
+        "tx_kicks_per_gib": _ratio(kicks, datapath_gib),
+        "eventfd_wakeups_per_second": _ratio(wakeups, elapsed),
+        "eventfd_values_per_wakeup": _ratio(float(counters.get("eventfd_values", 0)), wakeups),
+        "frames_per_worker_wakeup": _ratio(frames, wakeups),
+        "mib_per_worker_wakeup": _ratio(datapath_bytes / (1024**2), wakeups),
+        "descriptor_chains_per_wakeup": _ratio(chains, wakeups),
+        "descriptors_per_frame": _ratio(descriptors, frames),
+        "backend_calls_per_frame": _ratio(backend_calls, frames),
+        "flushes_per_gib": _ratio(flushes, datapath_gib),
+        "guest_irq_per_tx_kick": _ratio(guest_irq, kicks),
+        "frames_per_drain": _ratio(frames, drains),
+        "mib_per_drain": _ratio(datapath_bytes / (1024**2), drains),
+        "empty_drain_fraction": _ratio(float(counters.get("empty_drain_passes", 0)), drains),
+        "frames_per_flush": _ratio(float(counters.get("frames_between_flushes", 0)), flushes),
+        "mib_per_flush": _ratio(float(counters.get("bytes_between_flushes", 0)) / (1024**2), flushes),
+    }
+
+
 def enabled_virtio_feature_bits(value: object) -> list[int]:
     if not isinstance(value, str):
         return []
@@ -349,6 +508,48 @@ def write_profile_summary(output: Path, rows: list[dict[str, object]]) -> None:
                 )
 
 
+def write_tx_datapath_summary(output: Path, rows: list[dict[str, object]]) -> None:
+    records = [
+        {
+            "iteration": row["iteration"],
+            "throughput_mib_per_second": row["throughput_mib_per_second"],
+            "raw": row.get("tx_datapath", {}).get("raw", {}),
+            "derived": row.get("tx_datapath", {}).get("derived", {}),
+        }
+        for row in rows
+        if isinstance(row.get("tx_datapath"), dict)
+    ]
+    (output / "tx-datapath-profile.json").write_text(
+        json.dumps(records, indent=2) + "\n", encoding="utf-8"
+    )
+    keys = [
+        "tx_kicks_per_second",
+        "tx_kicks_per_gib",
+        "eventfd_wakeups_per_second",
+        "frames_per_worker_wakeup",
+        "mib_per_worker_wakeup",
+        "descriptor_chains_per_wakeup",
+        "descriptors_per_frame",
+        "backend_calls_per_frame",
+        "flushes_per_gib",
+        "guest_irq_per_tx_kick",
+    ]
+    with (output / "tx-datapath-profile.tsv").open("w", encoding="utf-8") as stream:
+        stream.write("iteration\tthroughput_mib_per_second\t" + "\t".join(keys) + "\n")
+        for record in records:
+            derived = record["derived"]
+            assert isinstance(derived, dict)
+            values = []
+            for key in keys:
+                value = derived.get(key)
+                values.append("" if value is None else f"{float(value):.6f}")
+            stream.write(
+                f"{int(record['iteration'])}\t{float(record['throughput_mib_per_second']):.6f}\t"
+                + "\t".join(values)
+                + "\n"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--network", default="default")
@@ -377,6 +578,7 @@ def main() -> int:
     prefix = f"krun-gcpu-{token.lower()}"
     label = f"krun-native-guest-cpu{args.cpus}"
     rows: list[dict[str, object]] = []
+    baseline_helper_pids = set(krun_helper_processes())
 
     (output / "metadata.json").write_text(
         json.dumps(
@@ -396,6 +598,8 @@ def main() -> int:
                 "libkrun_head": streams_bench.git_head(Path(".build-deps/libkrun")),
                 "platform": platform.platform(),
                 "machine": platform.machine(),
+                "tx_datapath_instrumentation": "signal-triggered aggregate counters",
+                "tx_datapath_timing_collected": False,
             },
             indent=2,
         )
@@ -414,6 +618,10 @@ def main() -> int:
             1,
             args.cpus,
         )
+        helper = find_new_krun_helper(baseline_helper_pids, endpoint.container_id)
+        bench.log(
+            f"TX datapath helper pid={helper.pid} config={helper.config_path} log={helper.log_path}"
+        )
         bench.log(f"warmup {label} guest_to_host P{args.streams}")
         measure_guest_to_host(
             bench,
@@ -425,6 +633,7 @@ def main() -> int:
         )
 
         for iteration in range(1, args.iterations + 1):
+            reset_tx_datapath(helper)
             before = guest_snapshot(bench, endpoint, f"guest-snapshot-{iteration}-before")
             result = measure_guest_to_host(
                 bench,
@@ -434,12 +643,19 @@ def main() -> int:
                 args.chunk_kib * 1024,
                 f"{label}-guest-to-host-p{args.streams}-{iteration}",
             )
+            tx_raw = snapshot_tx_datapath(helper)
             after = guest_snapshot(bench, endpoint, f"guest-snapshot-{iteration}-after")
             delta = snapshot_delta(before, after)
+            tx_derived = tx_datapath_derived(tx_raw, result, delta)
+            tx_record = {"raw": tx_raw, "derived": tx_derived}
+            (output / f"tx-datapath-{iteration}.json").write_text(
+                json.dumps(tx_record, indent=2) + "\n", encoding="utf-8"
+            )
             rows.append({
                 "iteration": iteration,
                 "throughput_mib_per_second": float(result["mib_per_second"]),
                 "delta": delta,
+                "tx_datapath": tx_record,
             })
             bench.record(
                 streams_bench.Sample(
@@ -475,6 +691,7 @@ def main() -> int:
         (output / "fatal-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
     finally:
         write_profile_summary(output, rows)
+        write_tx_datapath_summary(output, rows)
         bench.cleanup()
         streams_bench.write_results(bench, label, "unused")
         with tarfile.open(archive, "w:gz") as tar:

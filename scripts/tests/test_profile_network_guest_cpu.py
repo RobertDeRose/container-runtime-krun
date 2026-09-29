@@ -57,5 +57,63 @@ class ProcParsingTests(unittest.TestCase):
         compile(profile.GUEST_SNAPSHOT, "<guest-snapshot>", "exec")
 
 
+class TxDatapathTests(unittest.TestCase):
+    def test_parse_krun_helper_processes_finds_config_and_log(self):
+        text = (
+            "  41 /usr/bin/sudo -n -- "
+            "/Library/PrivilegedHelperTools/com.github.robertderose.container-runtime-krun/bin/"
+            "container-krun-vmm-helper "
+            "'/Users/test/Library/Application Support/krun/containers/abc/krun-vmm.json'\n"
+            "  42 python3 unrelated.py\n"
+        )
+        helpers = profile.parse_krun_helper_processes(text)
+        self.assertEqual(set(helpers), {41})
+        self.assertEqual(helpers[41].config_path.name, "krun-vmm.json")
+        self.assertEqual(helpers[41].log_path.name, "krun-vmm.log")
+        self.assertEqual(helpers[41].log_path.parent, helpers[41].config_path.parent)
+
+    def test_tx_datapath_derived_reports_requested_ratios(self):
+        counters = {
+            "queue_notify_writes": 100,
+            "eventfd_wakeups": 80,
+            "eventfd_values": 100,
+            "drain_passes": 50,
+            "empty_drain_passes": 5,
+            "frames": 400,
+            "bytes": 2 * 1024**3,
+            "descriptor_chains": 400,
+            "descriptors": 800,
+            "write_frame_calls": 400,
+            "flush_calls": 20,
+            "frames_between_flushes": 400,
+            "bytes_between_flushes": 2 * 1024**3,
+        }
+        result = {"elapsed_seconds": 20.0}
+        delta = {
+            "interrupts": [
+                {"total": 25, "matches_eth0_device": True},
+                {"total": 99, "matches_eth0_device": False},
+            ]
+        }
+        derived = profile.tx_datapath_derived(counters, result, delta)
+        self.assertEqual(derived["tx_kicks_per_second"], 5.0)
+        self.assertEqual(derived["tx_kicks_per_gib"], 50.0)
+        self.assertEqual(derived["eventfd_wakeups_per_second"], 4.0)
+        self.assertEqual(derived["frames_per_worker_wakeup"], 5.0)
+        self.assertEqual(derived["descriptor_chains_per_wakeup"], 5.0)
+        self.assertEqual(derived["descriptors_per_frame"], 2.0)
+        self.assertEqual(derived["backend_calls_per_frame"], 1.0)
+        self.assertEqual(derived["flushes_per_gib"], 10.0)
+        self.assertEqual(derived["guest_irq_per_tx_kick"], 0.25)
+        self.assertEqual(derived["empty_drain_fraction"], 0.1)
+
+    def test_tx_datapath_derived_handles_zero_denominators(self):
+        derived = profile.tx_datapath_derived({}, {"elapsed_seconds": 0.0}, {"interrupts": []})
+        self.assertIsNone(derived["tx_kicks_per_second"])
+        self.assertIsNone(derived["frames_per_worker_wakeup"])
+        self.assertIsNone(derived["descriptors_per_frame"])
+        self.assertIsNone(derived["guest_irq_per_tx_kick"])
+
+
 if __name__ == "__main__":
     unittest.main()

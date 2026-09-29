@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Profile guest per-vCPU and network softirq load during native-vmnet sustained P8 TX"
+#MISE description="Profile guest CPU plus aggregate TX datapath behavior during native-vmnet sustained P8 TX"
 #USAGE flag "--network <network>" help="Apple Container network" default="default"
 #USAGE flag "--image <image>" help="Python image used for benchmark endpoint" default="python:3.13-alpine"
 #USAGE flag "--streams <streams>" help="Parallel guest-to-host TCP streams" default="8"
