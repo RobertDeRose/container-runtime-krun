@@ -356,8 +356,26 @@ def reset_tx_datapath(helper: KrunHelperProcess) -> None:
         raise RuntimeError(f"libkrun rejected TX datapath reset: {payload}")
 
 
+TX_HANDOFF_REQUIRED_FIELDS = {
+    "notify_to_eventfd_samples",
+    "notify_to_eventfd_sample_ns",
+    "notify_to_eventfd_max_ns",
+    "irq_to_next_notify_samples",
+    "irq_to_next_notify_sample_ns",
+    "irq_to_next_notify_max_ns",
+}
+
+
 def snapshot_tx_datapath(helper: KrunHelperProcess) -> dict[str, object]:
-    return signal_tx_datapath(helper, signal.SIGUSR1, "KRUN_TX_DATAPATH_STATS")
+    payload = signal_tx_datapath(helper, signal.SIGUSR1, "KRUN_TX_DATAPATH_STATS")
+    missing = sorted(TX_HANDOFF_REQUIRED_FIELDS - payload.keys())
+    if missing:
+        raise RuntimeError(
+            "running libkrun lacks TX handoff instrumentation fields: "
+            + ", ".join(missing)
+            + "; rebuild libkrun and reinstall the native runtime before profiling"
+        )
+    return payload
 
 
 def _ratio(numerator: float, denominator: float) -> float | None:
@@ -726,6 +744,9 @@ def main() -> int:
         bench.log(
             f"TX datapath helper pid={helper.pid} config={helper.config_path} log={helper.log_path}"
         )
+        reset_tx_datapath(helper)
+        snapshot_tx_datapath(helper)
+        bench.log("TX datapath handoff instrumentation preflight passed")
         bench.log(f"warmup {label} guest_to_host P{args.streams}")
         measure_guest_to_host(
             bench,

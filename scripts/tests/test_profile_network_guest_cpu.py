@@ -75,6 +75,30 @@ class TxDatapathTests(unittest.TestCase):
         self.assertEqual(helpers[42].log_path.name, "krun-vmm.log")
         self.assertEqual(helpers[42].log_path.parent, helpers[42].config_path.parent)
 
+    def test_snapshot_tx_datapath_rejects_missing_handoff_fields(self):
+        original = profile.signal_tx_datapath
+        profile.signal_tx_datapath = lambda *_args, **_kwargs: {"network_index": 0}
+        try:
+            helper = profile.KrunHelperProcess(
+                42, pathlib.Path("/tmp/krun-vmm.json"), pathlib.Path("/tmp/krun-vmm.log")
+            )
+            with self.assertRaisesRegex(RuntimeError, "lacks TX handoff instrumentation fields"):
+                profile.snapshot_tx_datapath(helper)
+        finally:
+            profile.signal_tx_datapath = original
+
+    def test_snapshot_tx_datapath_accepts_handoff_fields(self):
+        payload = {"network_index": 0, **{key: 0 for key in profile.TX_HANDOFF_REQUIRED_FIELDS}}
+        original = profile.signal_tx_datapath
+        profile.signal_tx_datapath = lambda *_args, **_kwargs: payload
+        try:
+            helper = profile.KrunHelperProcess(
+                42, pathlib.Path("/tmp/krun-vmm.json"), pathlib.Path("/tmp/krun-vmm.log")
+            )
+            self.assertEqual(profile.snapshot_tx_datapath(helper), payload)
+        finally:
+            profile.signal_tx_datapath = original
+
     def test_tx_datapath_derived_reports_requested_ratios(self):
         counters = {
             "queue_notify_writes": 100,
