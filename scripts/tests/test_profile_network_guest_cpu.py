@@ -133,6 +133,9 @@ class TxDatapathTests(unittest.TestCase):
             "notify_to_eventfd_samples": 4,
             "notify_to_eventfd_sample_ns": 4_000,
             "notify_to_eventfd_max_ns": 1_500,
+            "eventfd_write_samples": 4,
+            "eventfd_write_sample_ns": 400,
+            "eventfd_write_max_ns": 150,
             "irq_to_next_notify_samples": 2,
             "irq_to_next_notify_sample_ns": 6_000,
             "irq_to_next_notify_max_ns": 4_000,
@@ -172,6 +175,11 @@ class TxDatapathTests(unittest.TestCase):
         self.assertEqual(derived["irq_signal_ns_per_sampled_call"], 300.0)
         self.assertEqual(derived["notify_to_eventfd_ns_per_sample"], 1_000.0)
         self.assertEqual(derived["notify_to_eventfd_max_ns"], 1_500.0)
+        self.assertEqual(derived["eventfd_write_ns_per_sample"], 100.0)
+        self.assertEqual(derived["eventfd_write_max_ns"], 150.0)
+        self.assertEqual(
+            derived["notify_to_worker_minus_eventfd_write_ns_per_sample"], 900.0
+        )
         self.assertEqual(derived["irq_to_next_notify_ns_per_sample"], 3_000.0)
         self.assertEqual(derived["irq_to_next_notify_max_ns"], 4_000.0)
         self.assertEqual(derived["estimated_tx_drain_active_fraction"], 0.00001)
@@ -190,6 +198,8 @@ class TxDatapathTests(unittest.TestCase):
         self.assertIsNone(derived["notification_check_ns_per_sampled_call"])
         self.assertIsNone(derived["irq_signal_ns_per_sampled_call"])
         self.assertIsNone(derived["notify_to_eventfd_ns_per_sample"])
+        self.assertIsNone(derived["eventfd_write_ns_per_sample"])
+        self.assertIsNone(derived["notify_to_worker_minus_eventfd_write_ns_per_sample"])
         self.assertIsNone(derived["irq_to_next_notify_ns_per_sample"])
         self.assertIsNone(derived["estimated_tx_drain_active_fraction"])
 

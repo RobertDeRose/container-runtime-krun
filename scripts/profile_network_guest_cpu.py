@@ -360,6 +360,9 @@ TX_HANDOFF_REQUIRED_FIELDS = {
     "notify_to_eventfd_samples",
     "notify_to_eventfd_sample_ns",
     "notify_to_eventfd_max_ns",
+    "eventfd_write_samples",
+    "eventfd_write_sample_ns",
+    "eventfd_write_max_ns",
     "irq_to_next_notify_samples",
     "irq_to_next_notify_sample_ns",
     "irq_to_next_notify_max_ns",
@@ -413,6 +416,8 @@ def tx_datapath_derived(
     irq_signal_sample_ns = float(counters.get("irq_signal_sample_ns", 0))
     notify_to_eventfd_samples = float(counters.get("notify_to_eventfd_samples", 0))
     notify_to_eventfd_sample_ns = float(counters.get("notify_to_eventfd_sample_ns", 0))
+    eventfd_write_samples = float(counters.get("eventfd_write_samples", 0))
+    eventfd_write_sample_ns = float(counters.get("eventfd_write_sample_ns", 0))
     irq_to_next_notify_samples = float(counters.get("irq_to_next_notify_samples", 0))
     irq_to_next_notify_sample_ns = float(counters.get("irq_to_next_notify_sample_ns", 0))
     sampled_frame_component_ns = descriptor_parse_ns + guest_copy_ns + backend_write_ns
@@ -485,6 +490,23 @@ def tx_datapath_derived(
         "notify_to_eventfd_max_ns": (
             float(counters.get("notify_to_eventfd_max_ns", 0))
             if notify_to_eventfd_samples
+            else None
+        ),
+        "eventfd_write_ns_per_sample": _ratio(
+            eventfd_write_sample_ns, eventfd_write_samples
+        ),
+        "eventfd_write_max_ns": (
+            float(counters.get("eventfd_write_max_ns", 0))
+            if eventfd_write_samples
+            else None
+        ),
+        "notify_to_worker_minus_eventfd_write_ns_per_sample": (
+            max(
+                0.0,
+                notify_to_eventfd_sample_ns / notify_to_eventfd_samples
+                - eventfd_write_sample_ns / eventfd_write_samples,
+            )
+            if notify_to_eventfd_samples and eventfd_write_samples
             else None
         ),
         "irq_to_next_notify_ns_per_sample": _ratio(
@@ -651,6 +673,9 @@ def write_tx_datapath_summary(output: Path, rows: list[dict[str, object]]) -> No
         "irq_signal_ns_per_sampled_call",
         "notify_to_eventfd_ns_per_sample",
         "notify_to_eventfd_max_ns",
+        "eventfd_write_ns_per_sample",
+        "eventfd_write_max_ns",
+        "notify_to_worker_minus_eventfd_write_ns_per_sample",
         "irq_to_next_notify_ns_per_sample",
         "irq_to_next_notify_max_ns",
         "estimated_tx_drain_active_fraction",
