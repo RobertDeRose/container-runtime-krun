@@ -106,6 +106,12 @@ class TxDatapathTests(unittest.TestCase):
             "notification_check_sample_ns": 800,
             "timing_sampled_irq_signals": 2,
             "irq_signal_sample_ns": 600,
+            "notify_to_eventfd_samples": 4,
+            "notify_to_eventfd_sample_ns": 4_000,
+            "notify_to_eventfd_max_ns": 1_500,
+            "irq_to_next_notify_samples": 2,
+            "irq_to_next_notify_sample_ns": 6_000,
+            "irq_to_next_notify_max_ns": 4_000,
         }
         result = {"elapsed_seconds": 20.0}
         delta = {
@@ -140,6 +146,11 @@ class TxDatapathTests(unittest.TestCase):
         self.assertEqual(derived["add_used_ns_per_sampled_frame"], 200.0)
         self.assertEqual(derived["notification_check_ns_per_sampled_call"], 200.0)
         self.assertEqual(derived["irq_signal_ns_per_sampled_call"], 300.0)
+        self.assertEqual(derived["notify_to_eventfd_ns_per_sample"], 1_000.0)
+        self.assertEqual(derived["notify_to_eventfd_max_ns"], 1_500.0)
+        self.assertEqual(derived["irq_to_next_notify_ns_per_sample"], 3_000.0)
+        self.assertEqual(derived["irq_to_next_notify_max_ns"], 4_000.0)
+        self.assertEqual(derived["estimated_tx_drain_active_fraction"], 0.00001)
 
     def test_tx_datapath_derived_handles_zero_denominators(self):
         derived = profile.tx_datapath_derived({}, {"elapsed_seconds": 0.0}, {"interrupts": []})
@@ -154,6 +165,9 @@ class TxDatapathTests(unittest.TestCase):
         self.assertIsNone(derived["add_used_ns_per_sampled_frame"])
         self.assertIsNone(derived["notification_check_ns_per_sampled_call"])
         self.assertIsNone(derived["irq_signal_ns_per_sampled_call"])
+        self.assertIsNone(derived["notify_to_eventfd_ns_per_sample"])
+        self.assertIsNone(derived["irq_to_next_notify_ns_per_sample"])
+        self.assertIsNone(derived["estimated_tx_drain_active_fraction"])
 
 
 if __name__ == "__main__":

@@ -393,6 +393,10 @@ def tx_datapath_derived(
     notification_check_sample_ns = float(counters.get("notification_check_sample_ns", 0))
     sampled_irq_signals = float(counters.get("timing_sampled_irq_signals", 0))
     irq_signal_sample_ns = float(counters.get("irq_signal_sample_ns", 0))
+    notify_to_eventfd_samples = float(counters.get("notify_to_eventfd_samples", 0))
+    notify_to_eventfd_sample_ns = float(counters.get("notify_to_eventfd_sample_ns", 0))
+    irq_to_next_notify_samples = float(counters.get("irq_to_next_notify_samples", 0))
+    irq_to_next_notify_sample_ns = float(counters.get("irq_to_next_notify_sample_ns", 0))
     sampled_frame_component_ns = descriptor_parse_ns + guest_copy_ns + backend_write_ns
     datapath_gib = datapath_bytes / (1024**3)
 
@@ -457,6 +461,28 @@ def tx_datapath_derived(
             notification_check_sample_ns, sampled_notification_checks
         ),
         "irq_signal_ns_per_sampled_call": _ratio(irq_signal_sample_ns, sampled_irq_signals),
+        "notify_to_eventfd_ns_per_sample": _ratio(
+            notify_to_eventfd_sample_ns, notify_to_eventfd_samples
+        ),
+        "notify_to_eventfd_max_ns": (
+            float(counters.get("notify_to_eventfd_max_ns", 0))
+            if notify_to_eventfd_samples
+            else None
+        ),
+        "irq_to_next_notify_ns_per_sample": _ratio(
+            irq_to_next_notify_sample_ns, irq_to_next_notify_samples
+        ),
+        "irq_to_next_notify_max_ns": (
+            float(counters.get("irq_to_next_notify_max_ns", 0))
+            if irq_to_next_notify_samples
+            else None
+        ),
+        "estimated_tx_drain_active_fraction": _ratio(
+            _ratio(drain_cycle_sample_ns, sampled_drain_cycles) * drains
+            if sampled_drain_cycles
+            else 0.0,
+            elapsed * 1_000_000_000.0,
+        ),
     }
 
 
@@ -605,6 +631,11 @@ def write_tx_datapath_summary(output: Path, rows: list[dict[str, object]]) -> No
         "add_used_ns_per_sampled_frame",
         "notification_check_ns_per_sampled_call",
         "irq_signal_ns_per_sampled_call",
+        "notify_to_eventfd_ns_per_sample",
+        "notify_to_eventfd_max_ns",
+        "irq_to_next_notify_ns_per_sample",
+        "irq_to_next_notify_max_ns",
+        "estimated_tx_drain_active_fraction",
     ]
     with (output / "tx-datapath-profile.tsv").open("w", encoding="utf-8") as stream:
         stream.write("iteration\tthroughput_mib_per_second\t" + "\t".join(keys) + "\n")
@@ -672,7 +703,7 @@ def main() -> int:
                 "machine": platform.machine(),
                 "tx_datapath_instrumentation": "signal-triggered aggregate counters",
                 "tx_datapath_timing_collected": True,
-                "tx_datapath_timing_mode": "1-in-64 frame, drain-cycle, completion, and flush sampling",
+                "tx_datapath_timing_mode": "1-in-64 frame, drain-cycle, completion, handoff, and flush sampling",
             },
             indent=2,
         )
