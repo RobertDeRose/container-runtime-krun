@@ -270,7 +270,10 @@ def parse_krun_helper_processes(text: str) -> dict[int, KrunHelperProcess]:
             argv = shlex.split(command.strip())
         except (ValueError, OSError):
             continue
-        if not any(Path(argument).name == "container-krun-vmm-helper" for argument in argv):
+        # The runtime launches the VMM through ``sudo -n -- helper ...``.
+        # The sudo wrapper therefore contains the helper name in its argv, but
+        # signals must target the helper process itself.
+        if not argv or Path(argv[0]).name != "container-krun-vmm-helper":
             continue
         config = next((Path(argument) for argument in reversed(argv) if argument.endswith("krun-vmm.json")), None)
         if config is None:

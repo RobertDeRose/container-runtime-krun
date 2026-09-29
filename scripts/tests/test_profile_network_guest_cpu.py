@@ -58,19 +58,22 @@ class ProcParsingTests(unittest.TestCase):
 
 
 class TxDatapathTests(unittest.TestCase):
-    def test_parse_krun_helper_processes_finds_config_and_log(self):
-        text = (
-            "  41 /usr/bin/sudo -n -- "
+    def test_parse_krun_helper_processes_ignores_sudo_wrapper(self):
+        config = "/Users/test/Library/Application Support/krun/containers/abc/krun-vmm.json"
+        helper = (
             "/Library/PrivilegedHelperTools/com.github.robertderose.container-runtime-krun/bin/"
-            "container-krun-vmm-helper "
-            "'/Users/test/Library/Application Support/krun/containers/abc/krun-vmm.json'\n"
-            "  42 python3 unrelated.py\n"
+            "container-krun-vmm-helper"
+        )
+        text = (
+            f"  41 /usr/bin/sudo -n -- {helper} '{config}'\n"
+            f"  42 {helper} '{config}'\n"
+            "  43 python3 unrelated.py\n"
         )
         helpers = profile.parse_krun_helper_processes(text)
-        self.assertEqual(set(helpers), {41})
-        self.assertEqual(helpers[41].config_path.name, "krun-vmm.json")
-        self.assertEqual(helpers[41].log_path.name, "krun-vmm.log")
-        self.assertEqual(helpers[41].log_path.parent, helpers[41].config_path.parent)
+        self.assertEqual(set(helpers), {42})
+        self.assertEqual(helpers[42].config_path.name, "krun-vmm.json")
+        self.assertEqual(helpers[42].log_path.name, "krun-vmm.log")
+        self.assertEqual(helpers[42].log_path.parent, helpers[42].config_path.parent)
 
     def test_tx_datapath_derived_reports_requested_ratios(self):
         counters = {
