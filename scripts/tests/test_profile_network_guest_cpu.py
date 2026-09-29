@@ -96,6 +96,16 @@ class TxDatapathTests(unittest.TestCase):
             "backend_write_sample_ns": 6_000,
             "timing_sampled_flushes": 4,
             "flush_sample_ns": 800,
+            "timing_sampled_drain_cycles": 5,
+            "timing_sampled_drain_frames": 40,
+            "drain_cycle_sample_ns": 20_000,
+            "tx_queue_disable_sample_ns": 500,
+            "tx_queue_enable_sample_ns": 1_000,
+            "add_used_sample_ns": 2_000,
+            "timing_sampled_notification_checks": 4,
+            "notification_check_sample_ns": 800,
+            "timing_sampled_irq_signals": 2,
+            "irq_signal_sample_ns": 600,
         }
         result = {"elapsed_seconds": 20.0}
         delta = {
@@ -122,6 +132,14 @@ class TxDatapathTests(unittest.TestCase):
         self.assertEqual(derived["guest_copy_sample_percent"], 30.0)
         self.assertEqual(derived["backend_write_sample_percent"], 60.0)
         self.assertEqual(derived["flush_ns_per_sampled_call"], 200.0)
+        self.assertEqual(derived["drain_cycle_ns_per_sampled_cycle"], 4_000.0)
+        self.assertEqual(derived["frames_per_sampled_drain_cycle"], 8.0)
+        self.assertEqual(derived["drain_cycle_ns_per_sampled_frame"], 500.0)
+        self.assertEqual(derived["tx_queue_disable_ns_per_sampled_cycle"], 100.0)
+        self.assertEqual(derived["tx_queue_enable_ns_per_sampled_cycle"], 200.0)
+        self.assertEqual(derived["add_used_ns_per_sampled_frame"], 200.0)
+        self.assertEqual(derived["notification_check_ns_per_sampled_call"], 200.0)
+        self.assertEqual(derived["irq_signal_ns_per_sampled_call"], 300.0)
 
     def test_tx_datapath_derived_handles_zero_denominators(self):
         derived = profile.tx_datapath_derived({}, {"elapsed_seconds": 0.0}, {"interrupts": []})
@@ -132,6 +150,10 @@ class TxDatapathTests(unittest.TestCase):
         self.assertIsNone(derived["descriptor_parse_ns_per_sampled_frame"])
         self.assertIsNone(derived["backend_write_sample_percent"])
         self.assertIsNone(derived["flush_ns_per_sampled_call"])
+        self.assertIsNone(derived["drain_cycle_ns_per_sampled_frame"])
+        self.assertIsNone(derived["add_used_ns_per_sampled_frame"])
+        self.assertIsNone(derived["notification_check_ns_per_sampled_call"])
+        self.assertIsNone(derived["irq_signal_ns_per_sampled_call"])
 
 
 if __name__ == "__main__":

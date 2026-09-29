@@ -383,6 +383,16 @@ def tx_datapath_derived(
     backend_write_ns = float(counters.get("backend_write_sample_ns", 0))
     sampled_flushes = float(counters.get("timing_sampled_flushes", 0))
     flush_sample_ns = float(counters.get("flush_sample_ns", 0))
+    sampled_drain_cycles = float(counters.get("timing_sampled_drain_cycles", 0))
+    sampled_drain_frames = float(counters.get("timing_sampled_drain_frames", 0))
+    drain_cycle_sample_ns = float(counters.get("drain_cycle_sample_ns", 0))
+    tx_queue_disable_sample_ns = float(counters.get("tx_queue_disable_sample_ns", 0))
+    tx_queue_enable_sample_ns = float(counters.get("tx_queue_enable_sample_ns", 0))
+    add_used_sample_ns = float(counters.get("add_used_sample_ns", 0))
+    sampled_notification_checks = float(counters.get("timing_sampled_notification_checks", 0))
+    notification_check_sample_ns = float(counters.get("notification_check_sample_ns", 0))
+    sampled_irq_signals = float(counters.get("timing_sampled_irq_signals", 0))
+    irq_signal_sample_ns = float(counters.get("irq_signal_sample_ns", 0))
     sampled_frame_component_ns = descriptor_parse_ns + guest_copy_ns + backend_write_ns
     datapath_gib = datapath_bytes / (1024**3)
 
@@ -427,6 +437,26 @@ def tx_datapath_derived(
             100.0 * backend_write_ns, sampled_frame_component_ns
         ),
         "flush_ns_per_sampled_call": _ratio(flush_sample_ns, sampled_flushes),
+        "drain_cycle_ns_per_sampled_cycle": _ratio(
+            drain_cycle_sample_ns, sampled_drain_cycles
+        ),
+        "frames_per_sampled_drain_cycle": _ratio(
+            sampled_drain_frames, sampled_drain_cycles
+        ),
+        "drain_cycle_ns_per_sampled_frame": _ratio(
+            drain_cycle_sample_ns, sampled_drain_frames
+        ),
+        "tx_queue_disable_ns_per_sampled_cycle": _ratio(
+            tx_queue_disable_sample_ns, sampled_drain_cycles
+        ),
+        "tx_queue_enable_ns_per_sampled_cycle": _ratio(
+            tx_queue_enable_sample_ns, sampled_drain_cycles
+        ),
+        "add_used_ns_per_sampled_frame": _ratio(add_used_sample_ns, sampled_frames),
+        "notification_check_ns_per_sampled_call": _ratio(
+            notification_check_sample_ns, sampled_notification_checks
+        ),
+        "irq_signal_ns_per_sampled_call": _ratio(irq_signal_sample_ns, sampled_irq_signals),
     }
 
 
@@ -567,6 +597,14 @@ def write_tx_datapath_summary(output: Path, rows: list[dict[str, object]]) -> No
         "guest_copy_sample_percent",
         "backend_write_sample_percent",
         "flush_ns_per_sampled_call",
+        "drain_cycle_ns_per_sampled_cycle",
+        "frames_per_sampled_drain_cycle",
+        "drain_cycle_ns_per_sampled_frame",
+        "tx_queue_disable_ns_per_sampled_cycle",
+        "tx_queue_enable_ns_per_sampled_cycle",
+        "add_used_ns_per_sampled_frame",
+        "notification_check_ns_per_sampled_call",
+        "irq_signal_ns_per_sampled_call",
     ]
     with (output / "tx-datapath-profile.tsv").open("w", encoding="utf-8") as stream:
         stream.write("iteration\tthroughput_mib_per_second\t" + "\t".join(keys) + "\n")
@@ -634,7 +672,7 @@ def main() -> int:
                 "machine": platform.machine(),
                 "tx_datapath_instrumentation": "signal-triggered aggregate counters",
                 "tx_datapath_timing_collected": True,
-                "tx_datapath_timing_mode": "1-in-64 frame and flush sampling",
+                "tx_datapath_timing_mode": "1-in-64 frame, drain-cycle, completion, and flush sampling",
             },
             indent=2,
         )
