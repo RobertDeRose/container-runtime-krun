@@ -377,6 +377,13 @@ def tx_datapath_derived(
     descriptors = float(counters.get("descriptors", 0))
     backend_calls = float(counters.get("write_frame_calls", 0))
     flushes = float(counters.get("flush_calls", 0))
+    sampled_frames = float(counters.get("timing_sampled_frames", 0))
+    descriptor_parse_ns = float(counters.get("descriptor_parse_sample_ns", 0))
+    guest_copy_ns = float(counters.get("guest_copy_sample_ns", 0))
+    backend_write_ns = float(counters.get("backend_write_sample_ns", 0))
+    sampled_flushes = float(counters.get("timing_sampled_flushes", 0))
+    flush_sample_ns = float(counters.get("flush_sample_ns", 0))
+    sampled_frame_component_ns = descriptor_parse_ns + guest_copy_ns + backend_write_ns
     datapath_gib = datapath_bytes / (1024**3)
 
     interrupts = delta.get("interrupts", [])
@@ -407,6 +414,19 @@ def tx_datapath_derived(
         "empty_drain_fraction": _ratio(float(counters.get("empty_drain_passes", 0)), drains),
         "frames_per_flush": _ratio(float(counters.get("frames_between_flushes", 0)), flushes),
         "mib_per_flush": _ratio(float(counters.get("bytes_between_flushes", 0)) / (1024**2), flushes),
+        "descriptor_parse_ns_per_sampled_frame": _ratio(descriptor_parse_ns, sampled_frames),
+        "guest_copy_ns_per_sampled_frame": _ratio(guest_copy_ns, sampled_frames),
+        "backend_write_ns_per_sampled_frame": _ratio(backend_write_ns, sampled_frames),
+        "descriptor_parse_sample_percent": _ratio(
+            100.0 * descriptor_parse_ns, sampled_frame_component_ns
+        ),
+        "guest_copy_sample_percent": _ratio(
+            100.0 * guest_copy_ns, sampled_frame_component_ns
+        ),
+        "backend_write_sample_percent": _ratio(
+            100.0 * backend_write_ns, sampled_frame_component_ns
+        ),
+        "flush_ns_per_sampled_call": _ratio(flush_sample_ns, sampled_flushes),
     }
 
 
@@ -540,6 +560,13 @@ def write_tx_datapath_summary(output: Path, rows: list[dict[str, object]]) -> No
         "backend_calls_per_frame",
         "flushes_per_gib",
         "guest_irq_per_tx_kick",
+        "descriptor_parse_ns_per_sampled_frame",
+        "guest_copy_ns_per_sampled_frame",
+        "backend_write_ns_per_sampled_frame",
+        "descriptor_parse_sample_percent",
+        "guest_copy_sample_percent",
+        "backend_write_sample_percent",
+        "flush_ns_per_sampled_call",
     ]
     with (output / "tx-datapath-profile.tsv").open("w", encoding="utf-8") as stream:
         stream.write("iteration\tthroughput_mib_per_second\t" + "\t".join(keys) + "\n")
@@ -606,7 +633,8 @@ def main() -> int:
                 "platform": platform.platform(),
                 "machine": platform.machine(),
                 "tx_datapath_instrumentation": "signal-triggered aggregate counters",
-                "tx_datapath_timing_collected": False,
+                "tx_datapath_timing_collected": True,
+                "tx_datapath_timing_mode": "1-in-64 frame and flush sampling",
             },
             indent=2,
         )

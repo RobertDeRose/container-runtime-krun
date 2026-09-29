@@ -90,6 +90,12 @@ class TxDatapathTests(unittest.TestCase):
             "flush_calls": 20,
             "frames_between_flushes": 400,
             "bytes_between_flushes": 2 * 1024**3,
+            "timing_sampled_frames": 10,
+            "descriptor_parse_sample_ns": 1_000,
+            "guest_copy_sample_ns": 3_000,
+            "backend_write_sample_ns": 6_000,
+            "timing_sampled_flushes": 4,
+            "flush_sample_ns": 800,
         }
         result = {"elapsed_seconds": 20.0}
         delta = {
@@ -109,6 +115,13 @@ class TxDatapathTests(unittest.TestCase):
         self.assertEqual(derived["flushes_per_gib"], 10.0)
         self.assertEqual(derived["guest_irq_per_tx_kick"], 0.25)
         self.assertEqual(derived["empty_drain_fraction"], 0.1)
+        self.assertEqual(derived["descriptor_parse_ns_per_sampled_frame"], 100.0)
+        self.assertEqual(derived["guest_copy_ns_per_sampled_frame"], 300.0)
+        self.assertEqual(derived["backend_write_ns_per_sampled_frame"], 600.0)
+        self.assertEqual(derived["descriptor_parse_sample_percent"], 10.0)
+        self.assertEqual(derived["guest_copy_sample_percent"], 30.0)
+        self.assertEqual(derived["backend_write_sample_percent"], 60.0)
+        self.assertEqual(derived["flush_ns_per_sampled_call"], 200.0)
 
     def test_tx_datapath_derived_handles_zero_denominators(self):
         derived = profile.tx_datapath_derived({}, {"elapsed_seconds": 0.0}, {"interrupts": []})
@@ -116,6 +129,9 @@ class TxDatapathTests(unittest.TestCase):
         self.assertIsNone(derived["frames_per_worker_wakeup"])
         self.assertIsNone(derived["descriptors_per_frame"])
         self.assertIsNone(derived["guest_irq_per_tx_kick"])
+        self.assertIsNone(derived["descriptor_parse_ns_per_sampled_frame"])
+        self.assertIsNone(derived["backend_write_sample_percent"])
+        self.assertIsNone(derived["flush_ns_per_sampled_call"])
 
 
 if __name__ == "__main__":
