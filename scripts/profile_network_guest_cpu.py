@@ -363,6 +363,14 @@ TX_HANDOFF_REQUIRED_FIELDS = {
     "eventfd_write_samples",
     "eventfd_write_sample_ns",
     "eventfd_write_max_ns",
+    "notify_while_worker_waiting_samples",
+    "notify_while_worker_busy_samples",
+    "notify_to_kqueue_ready_samples",
+    "notify_to_kqueue_ready_sample_ns",
+    "notify_to_kqueue_ready_max_ns",
+    "kqueue_ready_to_eventfd_samples",
+    "kqueue_ready_to_eventfd_sample_ns",
+    "kqueue_ready_to_eventfd_max_ns",
     "irq_to_next_notify_samples",
     "irq_to_next_notify_sample_ns",
     "irq_to_next_notify_max_ns",
@@ -418,6 +426,12 @@ def tx_datapath_derived(
     notify_to_eventfd_sample_ns = float(counters.get("notify_to_eventfd_sample_ns", 0))
     eventfd_write_samples = float(counters.get("eventfd_write_samples", 0))
     eventfd_write_sample_ns = float(counters.get("eventfd_write_sample_ns", 0))
+    notify_waiting_samples = float(counters.get("notify_while_worker_waiting_samples", 0))
+    notify_busy_samples = float(counters.get("notify_while_worker_busy_samples", 0))
+    notify_to_kqueue_ready_samples = float(counters.get("notify_to_kqueue_ready_samples", 0))
+    notify_to_kqueue_ready_sample_ns = float(counters.get("notify_to_kqueue_ready_sample_ns", 0))
+    kqueue_ready_to_eventfd_samples = float(counters.get("kqueue_ready_to_eventfd_samples", 0))
+    kqueue_ready_to_eventfd_sample_ns = float(counters.get("kqueue_ready_to_eventfd_sample_ns", 0))
     irq_to_next_notify_samples = float(counters.get("irq_to_next_notify_samples", 0))
     irq_to_next_notify_sample_ns = float(counters.get("irq_to_next_notify_sample_ns", 0))
     sampled_frame_component_ns = descriptor_parse_ns + guest_copy_ns + backend_write_ns
@@ -507,6 +521,25 @@ def tx_datapath_derived(
                 - eventfd_write_sample_ns / eventfd_write_samples,
             )
             if notify_to_eventfd_samples and eventfd_write_samples
+            else None
+        ),
+        "notify_worker_waiting_fraction": _ratio(
+            notify_waiting_samples, notify_waiting_samples + notify_busy_samples
+        ),
+        "notify_to_kqueue_ready_ns_per_sample": _ratio(
+            notify_to_kqueue_ready_sample_ns, notify_to_kqueue_ready_samples
+        ),
+        "notify_to_kqueue_ready_max_ns": (
+            float(counters.get("notify_to_kqueue_ready_max_ns", 0))
+            if notify_to_kqueue_ready_samples
+            else None
+        ),
+        "kqueue_ready_to_eventfd_ns_per_sample": _ratio(
+            kqueue_ready_to_eventfd_sample_ns, kqueue_ready_to_eventfd_samples
+        ),
+        "kqueue_ready_to_eventfd_max_ns": (
+            float(counters.get("kqueue_ready_to_eventfd_max_ns", 0))
+            if kqueue_ready_to_eventfd_samples
             else None
         ),
         "irq_to_next_notify_ns_per_sample": _ratio(
@@ -676,6 +709,11 @@ def write_tx_datapath_summary(output: Path, rows: list[dict[str, object]]) -> No
         "eventfd_write_ns_per_sample",
         "eventfd_write_max_ns",
         "notify_to_worker_minus_eventfd_write_ns_per_sample",
+        "notify_worker_waiting_fraction",
+        "notify_to_kqueue_ready_ns_per_sample",
+        "notify_to_kqueue_ready_max_ns",
+        "kqueue_ready_to_eventfd_ns_per_sample",
+        "kqueue_ready_to_eventfd_max_ns",
         "irq_to_next_notify_ns_per_sample",
         "irq_to_next_notify_max_ns",
         "estimated_tx_drain_active_fraction",
@@ -785,14 +823,27 @@ def main() -> int:
         for iteration in range(1, args.iterations + 1):
             reset_tx_datapath(helper)
             before = guest_snapshot(bench, endpoint, f"guest-snapshot-{iteration}-before")
-            result = measure_guest_to_host(
-                bench,
-                endpoint,
-                args.streams,
-                args.seconds,
-                args.chunk_kib * 1024,
-                f"{label}-guest-to-host-p{args.streams}-{iteration}",
-            )
+            try:
+                result = measure_guest_to_host(
+                    bench,
+                    endpoint,
+                    args.streams,
+                    args.seconds,
+                    args.chunk_kib * 1024,
+                    f"{label}-guest-to-host-p{args.streams}-{iteration}",
+                )
+            except Exception:
+                try:
+                    failed_tx_raw = snapshot_tx_datapath(helper)
+                    (output / f"tx-datapath-{iteration}-failed.json").write_text(
+                        json.dumps({"raw": failed_tx_raw}, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                except Exception as snapshot_error:
+                    (output / f"tx-datapath-{iteration}-failed.txt").write_text(
+                        repr(snapshot_error) + "\n", encoding="utf-8"
+                    )
+                raise
             tx_raw = snapshot_tx_datapath(helper)
             after = guest_snapshot(bench, endpoint, f"guest-snapshot-{iteration}-after")
             delta = snapshot_delta(before, after)

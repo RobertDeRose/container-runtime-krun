@@ -136,6 +136,14 @@ class TxDatapathTests(unittest.TestCase):
             "eventfd_write_samples": 4,
             "eventfd_write_sample_ns": 400,
             "eventfd_write_max_ns": 150,
+            "notify_while_worker_waiting_samples": 3,
+            "notify_while_worker_busy_samples": 1,
+            "notify_to_kqueue_ready_samples": 4,
+            "notify_to_kqueue_ready_sample_ns": 3_200,
+            "notify_to_kqueue_ready_max_ns": 1_100,
+            "kqueue_ready_to_eventfd_samples": 4,
+            "kqueue_ready_to_eventfd_sample_ns": 800,
+            "kqueue_ready_to_eventfd_max_ns": 300,
             "irq_to_next_notify_samples": 2,
             "irq_to_next_notify_sample_ns": 6_000,
             "irq_to_next_notify_max_ns": 4_000,
@@ -180,6 +188,11 @@ class TxDatapathTests(unittest.TestCase):
         self.assertEqual(
             derived["notify_to_worker_minus_eventfd_write_ns_per_sample"], 900.0
         )
+        self.assertEqual(derived["notify_worker_waiting_fraction"], 0.75)
+        self.assertEqual(derived["notify_to_kqueue_ready_ns_per_sample"], 800.0)
+        self.assertEqual(derived["notify_to_kqueue_ready_max_ns"], 1_100.0)
+        self.assertEqual(derived["kqueue_ready_to_eventfd_ns_per_sample"], 200.0)
+        self.assertEqual(derived["kqueue_ready_to_eventfd_max_ns"], 300.0)
         self.assertEqual(derived["irq_to_next_notify_ns_per_sample"], 3_000.0)
         self.assertEqual(derived["irq_to_next_notify_max_ns"], 4_000.0)
         self.assertEqual(derived["estimated_tx_drain_active_fraction"], 0.00001)
@@ -200,6 +213,9 @@ class TxDatapathTests(unittest.TestCase):
         self.assertIsNone(derived["notify_to_eventfd_ns_per_sample"])
         self.assertIsNone(derived["eventfd_write_ns_per_sample"])
         self.assertIsNone(derived["notify_to_worker_minus_eventfd_write_ns_per_sample"])
+        self.assertIsNone(derived["notify_worker_waiting_fraction"])
+        self.assertIsNone(derived["notify_to_kqueue_ready_ns_per_sample"])
+        self.assertIsNone(derived["kqueue_ready_to_eventfd_ns_per_sample"])
         self.assertIsNone(derived["irq_to_next_notify_ns_per_sample"])
         self.assertIsNone(derived["estimated_tx_drain_active_fraction"])
 
