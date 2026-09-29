@@ -1,6 +1,11 @@
 import Foundation
 import KrunVMMIPC
 
+public enum KrunVMMProfileSignalCommand: UInt8, Sendable, Equatable {
+  case snapshot = 1
+  case reset = 2
+}
+
 public enum KrunVMMControlRequest: Sendable, Equatable {
   case dial(port: UInt32)
 }
@@ -35,6 +40,36 @@ public enum KrunVMMControlChannel {
       FileHandle(fileDescriptor: descriptors[0], closeOnDealloc: true),
       FileHandle(fileDescriptor: descriptors[1], closeOnDealloc: true)
     )
+  }
+
+  public static func installProfileSignalRelay(
+    snapshotSignal: Int32,
+    resetSignal: Int32
+  ) throws -> FileHandle {
+    var readFD: Int32 = -1
+    try check(
+      krun_vmm_ipc_install_profile_signal_relay(
+        &readFD, snapshotSignal, resetSignal
+      )
+    )
+    return FileHandle(fileDescriptor: readFD, closeOnDealloc: true)
+  }
+
+  public static func receiveProfileSignal(from fd: Int32) throws -> KrunVMMProfileSignalCommand? {
+    var raw: UInt8 = 0
+    let result = krun_vmm_ipc_recv_profile_signal(fd, &raw)
+    if result == 0 {
+      return nil
+    }
+    try check(result < 0 ? result : 0)
+    guard let command = KrunVMMProfileSignalCommand(rawValue: raw) else {
+      throw KrunVMMControlError.unknownOpcode(UInt32(raw))
+    }
+    return command
+  }
+
+  public static func uninstallProfileSignalRelay() throws {
+    try check(krun_vmm_ipc_uninstall_profile_signal_relay())
   }
 
   public static func sendDialRequest(to fd: Int32, port: UInt32) throws {

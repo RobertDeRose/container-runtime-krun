@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -12,6 +13,43 @@ struct krun_vmm_request {
     uint32_t opcode;
     uint32_t port;
 };
+
+#define KRUN_VMM_PROFILE_SIGNAL_SNAPSHOT 1
+#define KRUN_VMM_PROFILE_SIGNAL_RESET 2
+
+static volatile sig_atomic_t profile_signal_write_fd = -1;
+static volatile sig_atomic_t profile_snapshot_signal = 0;
+static volatile sig_atomic_t profile_reset_signal = 0;
+static struct sigaction profile_old_snapshot_action;
+static struct sigaction profile_old_reset_action;
+static int profile_signal_relay_installed = 0;
+
+static void profile_signal_handler(int signal_number) {
+    int saved_errno = errno;
+    uint8_t command = 0;
+    if (signal_number == profile_snapshot_signal) {
+        command = KRUN_VMM_PROFILE_SIGNAL_SNAPSHOT;
+    } else if (signal_number == profile_reset_signal) {
+        command = KRUN_VMM_PROFILE_SIGNAL_RESET;
+    }
+
+    int fd = profile_signal_write_fd;
+    if (fd >= 0 && command != 0) {
+        ssize_t result;
+        do {
+            result = write(fd, &command, sizeof(command));
+        } while (result < 0 && errno == EINTR);
+    }
+    errno = saved_errno;
+}
+
+static int set_nonblock(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
 
 static int32_t neg_errno(void) {
     return errno == 0 ? -EIO : -errno;
@@ -258,5 +296,111 @@ int32_t krun_vmm_ipc_recv_response(int32_t fd, int32_t *status, int32_t *passed_
 
     *status = decoded_status;
     *passed_fd = received_fd;
+    return 0;
+}
+
+int32_t krun_vmm_ipc_install_profile_signal_relay(
+    int32_t *read_fd, int32_t snapshot_signal, int32_t reset_signal
+) {
+    if (read_fd == NULL || snapshot_signal <= 0 || reset_signal <= 0 ||
+        snapshot_signal == reset_signal || profile_signal_relay_installed) {
+        return -EINVAL;
+    }
+
+    int descriptors[2] = {-1, -1};
+    if (pipe(descriptors) < 0) {
+        return neg_errno();
+    }
+    if (set_cloexec(descriptors[0]) < 0 || set_cloexec(descriptors[1]) < 0 ||
+        set_nonblock(descriptors[1]) < 0) {
+        int saved = errno;
+        close(descriptors[0]);
+        close(descriptors[1]);
+        errno = saved;
+        return neg_errno();
+    }
+
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = profile_signal_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+
+    profile_signal_write_fd = descriptors[1];
+    profile_snapshot_signal = snapshot_signal;
+    profile_reset_signal = reset_signal;
+
+    if (sigaction(snapshot_signal, &action, &profile_old_snapshot_action) < 0) {
+        int saved = errno;
+        profile_signal_write_fd = -1;
+        profile_snapshot_signal = 0;
+        profile_reset_signal = 0;
+        close(descriptors[0]);
+        close(descriptors[1]);
+        errno = saved;
+        return neg_errno();
+    }
+    if (sigaction(reset_signal, &action, &profile_old_reset_action) < 0) {
+        int saved = errno;
+        sigaction(snapshot_signal, &profile_old_snapshot_action, NULL);
+        profile_signal_write_fd = -1;
+        profile_snapshot_signal = 0;
+        profile_reset_signal = 0;
+        close(descriptors[0]);
+        close(descriptors[1]);
+        errno = saved;
+        return neg_errno();
+    }
+
+    profile_signal_relay_installed = 1;
+    *read_fd = descriptors[0];
+    return 0;
+}
+
+int32_t krun_vmm_ipc_recv_profile_signal(int32_t fd, uint8_t *command) {
+    if (fd < 0 || command == NULL) {
+        return -EINVAL;
+    }
+    ssize_t result;
+    do {
+        result = read(fd, command, sizeof(*command));
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) {
+        return neg_errno();
+    }
+    if (result == 0) {
+        return 0;
+    }
+    return result == (ssize_t)sizeof(*command) ? 1 : -EPROTO;
+}
+
+int32_t krun_vmm_ipc_uninstall_profile_signal_relay(void) {
+    if (!profile_signal_relay_installed) {
+        return 0;
+    }
+
+    int snapshot_signal = profile_snapshot_signal;
+    int reset_signal = profile_reset_signal;
+    int write_fd = profile_signal_write_fd;
+    int first_error = 0;
+
+    profile_signal_write_fd = -1;
+    profile_snapshot_signal = 0;
+    profile_reset_signal = 0;
+    profile_signal_relay_installed = 0;
+
+    if (sigaction(snapshot_signal, &profile_old_snapshot_action, NULL) < 0) {
+        first_error = errno;
+    }
+    if (sigaction(reset_signal, &profile_old_reset_action, NULL) < 0 && first_error == 0) {
+        first_error = errno;
+    }
+    if (write_fd >= 0 && close(write_fd) < 0 && first_error == 0) {
+        first_error = errno;
+    }
+    if (first_error != 0) {
+        errno = first_error;
+        return neg_errno();
+    }
     return 0;
 }

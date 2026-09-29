@@ -466,28 +466,42 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
   terminationSource.resume()
 
   // Profiling is opt-in and signal-driven so normal VMM execution does not emit
-  // datapath logs. SIGUSR2 starts a fresh measurement window and SIGUSR1 emits
-  // one aggregate snapshot for each configured network.
-  signal(SIGUSR1, SIG_IGN)
-  signal(SIGUSR2, SIG_IGN)
+  // datapath logs. Relay the profiling signals through an async-signal-safe pipe
+  // instead of relying on DispatchSource signal delivery.
+  let txStatsSignalHandle = try KrunVMMControlChannel.installProfileSignalRelay(
+    snapshotSignal: SIGUSR1,
+    resetSignal: SIGUSR2
+  )
+  let txStatsSignalFD = txStatsSignalHandle.fileDescriptor
   let txStatsQueue = DispatchQueue(label: "com.github.robertderose.container-runtime-krun.tx-stats")
-  let txStatsSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: txStatsQueue)
-  txStatsSource.setEventHandler {
-    emitTxDatapathStats(krun: krun, context: context, networkCount: config.networks.count)
+  txStatsQueue.async {
+    while true {
+      do {
+        guard let command = try KrunVMMControlChannel.receiveProfileSignal(from: txStatsSignalFD)
+        else {
+          return
+        }
+        switch command {
+        case .snapshot:
+          emitTxDatapathStats(krun: krun, context: context, networkCount: config.networks.count)
+        case .reset:
+          resetTxDatapathStats(krun: krun, context: context, networkCount: config.networks.count)
+        }
+      } catch {
+        HelperLifecycleTrace.mark(
+          startedAt: startedAt,
+          event: "TX datapath signal relay closed",
+          metadata: ["error": "\(error)"]
+        )
+        return
+      }
+    }
   }
-  txStatsSource.resume()
-  let txStatsResetSource = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: txStatsQueue)
-  txStatsResetSource.setEventHandler {
-    resetTxDatapathStats(krun: krun, context: context, networkCount: config.networks.count)
-  }
-  txStatsResetSource.resume()
 
   defer {
-    txStatsResetSource.cancel()
-    txStatsSource.cancel()
+    try? KrunVMMControlChannel.uninstallProfileSignalRelay()
+    try? txStatsSignalHandle.close()
     terminationSource.cancel()
-    signal(SIGUSR2, SIG_DFL)
-    signal(SIGUSR1, SIG_DFL)
     signal(SIGTERM, SIG_DFL)
   }
 
