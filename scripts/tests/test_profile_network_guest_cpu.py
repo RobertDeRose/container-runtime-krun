@@ -1,6 +1,8 @@
 import importlib.util
 import pathlib
 import sys
+import tempfile
+from unittest import mock
 import unittest
 
 
@@ -55,6 +57,34 @@ class ProcParsingTests(unittest.TestCase):
 
     def test_guest_snapshot_script_compiles(self):
         compile(profile.GUEST_SNAPSHOT, "<guest-snapshot>", "exec")
+
+
+class HostSinkEvidenceTests(unittest.TestCase):
+    def test_profile_transfer_saves_per_sample_sink_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            bench = profile.streams_bench.Benchmark(output, timeout=5)
+            endpoint = profile.streams_bench.Endpoint("test", "test-r1", "127.0.0.2", "127.0.0.1", 1234)
+            measured = {"bytes": 1024}
+            with mock.patch.object(profile.streams_bench, "guest_source", return_value=measured):
+                result = profile.measure_guest_to_host(bench, endpoint, 1, 0.01, 1024, "sample-1")
+            self.assertEqual(result, measured)
+            evidence = profile.json.loads((output / "sample-1-host-sink.json").read_text())
+            self.assertEqual(evidence["unfinished_workers"], 0)
+            self.assertIsNone(evidence["primary_error"])
+
+    def test_profile_transfer_failure_keeps_evidence_and_source_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            bench = profile.streams_bench.Benchmark(output, timeout=5)
+            endpoint = profile.streams_bench.Endpoint("test", "test-r1", "127.0.0.2", "127.0.0.1", 1234)
+            original = RuntimeError("sample source timeout")
+            with mock.patch.object(profile.streams_bench, "guest_source", side_effect=original):
+                with self.assertRaises(RuntimeError) as caught:
+                    profile.measure_guest_to_host(bench, endpoint, 1, 0.01, 1024, "sample-2")
+            self.assertIs(caught.exception, original)
+            evidence = profile.json.loads((output / "sample-2-host-sink.json").read_text())
+            self.assertIn("sample source timeout", evidence["primary_error"])
 
 
 class TxDatapathTests(unittest.TestCase):

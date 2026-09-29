@@ -385,6 +385,26 @@ container cleanup:
 - `<sample-label>-network-inspect.txt` and `*-guest-logs.txt`: container state
   and guest logs at failure time.
 
+A guest source failure also emits one `KRUN_STREAM_FAILURE` JSON record in the
+sample command log. Each stream reports the failed phase (`connect`,
+`start_barrier`, `send_payload`, `send_trailer`, or `receive_ack`), its endpoint
+addresses, and bytes from completed `sendall()` calls. A failing `sendall()` may
+have transmitted additional bytes, so that counter is a lower bound, not an
+exact failure-position byte count. Raw Linux `TCP_INFO` is captured before the
+failing socket closes; `/proc/net/tcp`, `snmp`, and `netstat` are captured once,
+on the first failure. The TCP information remains raw rather than assuming a
+kernel-specific structure layout.
+
+The standalone `profile:network-guest-cpu` task additionally saves
+`<sample-label>-host-sink.json` after each transfer. It contains per-connection
+wire bytes, whether the trailer was received and validated, and whether the
+byte-count acknowledgement was sent. Source and sink records can be matched by
+TCP endpoint addresses. Records are published only when a connection finishes;
+`unfinished_workers` explicitly reports any handlers that have not finished.
+No per-packet logs, progress locks, or additional per-packet clock calls are
+added. Socket timeouts, payloads, and the trailer/acknowledgement protocol are
+unchanged. Sink cleanup errors are retained without replacing a source error.
+
 Each diagnostic command has a ten-second timeout. Missing tools and diagnostic
 failures are recorded without replacing the original transfer failure. The
 failed transfer is not retried, and no routes, firewall settings, network

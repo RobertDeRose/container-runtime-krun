@@ -615,7 +615,9 @@ def measure_guest_to_host(
     chunk_bytes: int,
     label: str,
 ) -> dict[str, object]:
-    with streams_bench.SinkServer(endpoint.gateway) as sink:
+    with streams_bench.SinkServer(
+        endpoint.gateway, evidence_path=bench.output / f"{label}-host-sink.json",
+    ) as sink:
         return streams_bench.guest_source(
             bench,
             endpoint,

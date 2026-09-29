@@ -111,7 +111,8 @@ for required in (
     '"/proc/stat"',
     '"/proc/softirqs"',
     '"/proc/net/softnet_stat"',
-    'SinkServer(endpoint.gateway)',
+    'streams_bench.SinkServer(',
+    'endpoint.gateway, evidence_path=bench.output / f"{label}-host-sink.json"',
 ):
     if required not in guest_cpu_profile_script:
         print(f"guest CPU profiler contract is missing {required}", file=sys.stderr)

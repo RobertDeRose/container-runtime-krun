@@ -68,6 +68,7 @@ while True:
 
 GUEST_SOURCE = r'''
 import json
+from pathlib import Path
 import socket
 import struct
 import sys
@@ -83,6 +84,8 @@ chunk = b"s" * chunk_bytes
 TRAILER_MAGIC = b"\x00KRUN_STREAM_END\x00"
 state = {}
 errors = []
+failures = []
+failure_network = {}
 results = []
 lock = threading.Lock()
 
@@ -102,25 +105,73 @@ def recv_exact(sock, count):
         data.extend(part)
     return bytes(data)
 
-def worker():
+def record_failure(stream_id, phase, sent, sock, error):
+    # Called only after an operation fails, while the socket is still open.
+    # sent counts completed sendall calls; a failing call may have sent more.
+    failure = {
+        "stream_id": stream_id,
+        "phase": phase,
+        "completed_send_bytes": sent,
+        "error": repr(error),
+        "elapsed_seconds": (
+            (time.perf_counter_ns() - state["start_ns"]) / 1_000_000_000
+            if "start_ns" in state else None
+        ),
+    }
+    if sock is not None:
+        for key, read in (
+            ("local_address", sock.getsockname),
+            ("peer_address", sock.getpeername),
+            ("tcp_info_hex", lambda: sock.getsockopt(
+                socket.IPPROTO_TCP, socket.TCP_INFO, 256,
+            ).hex()),
+        ):
+            try:
+                failure[key] = read()
+            except Exception as detail_error:
+                failure[key] = {"error": repr(detail_error)}
+    with lock:
+        failures.append(failure)
+        if not failure_network:
+            for name in ("tcp", "snmp", "netstat"):
+                try:
+                    failure_network[name] = Path("/proc/net", name).read_text()
+                except OSError as read_error:
+                    failure_network[name] = "ERROR: " + repr(read_error)
+
+
+def worker(stream_id):
     sent = 0
+    phase = "connect"
+    recorded = False
     try:
         with socket.create_connection((host, port), timeout=30) as sock:
-            sock.settimeout(30)
-            barrier.wait(timeout=30)
-            deadline = state["deadline_ns"]
-            while time.perf_counter_ns() < deadline:
-                sock.sendall(chunk)
-                sent += len(chunk)
-            send_end_ns = time.perf_counter_ns()
-            sock.sendall(TRAILER_MAGIC + struct.pack("!Q", sent))
-            received = struct.unpack("!Q", recv_exact(sock, 8))[0]
-            if received != sent:
-                raise RuntimeError(f"sink byte mismatch sent={sent} received={received}")
-            completion_end_ns = time.perf_counter_ns()
+            try:
+                sock.settimeout(30)
+                phase = "start_barrier"
+                barrier.wait(timeout=30)
+                deadline = state["deadline_ns"]
+                phase = "send_payload"
+                while time.perf_counter_ns() < deadline:
+                    sock.sendall(chunk)
+                    sent += len(chunk)
+                send_end_ns = time.perf_counter_ns()
+                phase = "send_trailer"
+                sock.sendall(TRAILER_MAGIC + struct.pack("!Q", sent))
+                phase = "receive_ack"
+                received = struct.unpack("!Q", recv_exact(sock, 8))[0]
+                if received != sent:
+                    raise RuntimeError(f"sink byte mismatch sent={sent} received={received}")
+                completion_end_ns = time.perf_counter_ns()
+            except Exception as error:
+                record_failure(stream_id, phase, sent, sock, error)
+                recorded = True
+                raise
         with lock:
             results.append((sent, send_end_ns, completion_end_ns))
     except Exception as error:
+        if not recorded:
+            record_failure(stream_id, phase, sent, None, error)
         with lock:
             errors.append(repr(error))
         try:
@@ -128,7 +179,7 @@ def worker():
         except Exception:
             pass
 
-threads = [threading.Thread(target=worker) for _ in range(streams)]
+threads = [threading.Thread(target=worker, args=(index,)) for index in range(streams)]
 for thread in threads:
     thread.start()
 try:
@@ -140,6 +191,11 @@ for thread in threads:
 if any(thread.is_alive() for thread in threads):
     errors.append("source worker did not terminate")
 if errors:
+    print("KRUN_STREAM_FAILURE " + json.dumps({
+        "streams": sorted(failures, key=lambda row: row["stream_id"]),
+        "network_at_first_failure": failure_network,
+        "errors": errors,
+    }, sort_keys=True), file=sys.stderr, flush=True)
     raise SystemExit("; ".join(errors))
 byte_count = sum(item[0] for item in results)
 send_end_ns = max(item[1] for item in results)
@@ -179,7 +235,7 @@ class Sample:
 
 
 class SinkServer:
-    def __init__(self, address: str, port: int = 0) -> None:
+    def __init__(self, address: str, port: int = 0, *, evidence_path: Path | None = None) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind((address, port))
@@ -188,6 +244,9 @@ class SinkServer:
         self.port = int(self.socket.getsockname()[1])
         self.stop_event = threading.Event()
         self.errors: list[str] = []
+        self.connections: list[dict[str, object]] = []
+        self.results_lock = threading.Lock()
+        self.evidence_path = evidence_path
         self.workers: list[threading.Thread] = []
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
@@ -209,8 +268,11 @@ class SinkServer:
     def _handle(self, conn: socket.socket) -> None:
         wire_bytes = 0
         tail = b""
+        record: dict[str, object] = {"phase": "receive_payload", "ack_sent": False}
         try:
             with conn:
+                record["local_address"] = conn.getsockname()
+                record["peer_address"] = conn.getpeername()
                 conn.settimeout(30)
                 while True:
                     data = conn.recv(256 * 1024)
@@ -221,14 +283,26 @@ class SinkServer:
                     if len(tail) == STREAM_TRAILER_LEN and tail.startswith(STREAM_TRAILER_MAGIC):
                         expected = struct.unpack("!Q", tail[len(STREAM_TRAILER_MAGIC):])[0]
                         received = wire_bytes - STREAM_TRAILER_LEN
+                        record["expected_payload_bytes"] = expected
+                        record["received_payload_bytes"] = received
                         if received != expected:
                             raise RuntimeError(
                                 f"stream byte mismatch expected={expected} received={received}"
                             )
+                        record["phase"] = "send_ack"
                         conn.sendall(struct.pack("!Q", received))
+                        record["ack_sent"] = True
+                        record["phase"] = "complete"
                         return
         except Exception as error:
-            self.errors.append(repr(error))
+            record["error"] = repr(error)
+        finally:
+            # Publish once per connection, never once per received chunk.
+            record["wire_bytes"] = wire_bytes
+            with self.results_lock:
+                self.connections.append(record)
+                if "error" in record:
+                    self.errors.append(str(record["error"]))
 
     def close(self) -> None:
         self.stop_event.set()
@@ -243,7 +317,29 @@ class SinkServer:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
+        close_error = None
+        try:
+            self.close()
+        except Exception as error:
+            close_error = error
+        if self.evidence_path is not None:
+            with self.results_lock:
+                evidence = {
+                    "connections": list(self.connections),
+                    "errors": list(self.errors),
+                    "unfinished_workers": sum(worker.is_alive() for worker in self.workers),
+                    "primary_error": repr(exc) if exc is not None else None,
+                    "close_error": repr(close_error) if close_error is not None else None,
+                }
+            try:
+                self.evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            except OSError as error:
+                print(f"[network-streams] could not save host sink evidence: {error}", file=sys.stderr)
+        if close_error is not None:
+            if exc is None:
+                raise close_error
+            # A reset during timeout cleanup must not replace the source error.
+            print(f"[network-streams] additional host sink failure: {close_error}", file=sys.stderr)
 
 
 class Benchmark:
