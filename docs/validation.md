@@ -480,3 +480,49 @@ names retain their Linux `tcpi_` names. Key interpretation rules:
 Use `sending` samples for sustained-flow state, and the connected/payload-end/
 complete boundaries for cumulative deltas. Do not treat final post-acknowledgement
 window or unacknowledged values as representative of sustained transmission.
+
+### Socket-only congestion-control comparison
+
+When a TCP profile shows no meaningful loss or window/buffer limitation, compare
+BBR with Reno using the same Apple/krun pair before changing the runtime datapath:
+
+```bash
+for algorithm in bbr reno; do
+  mise run benchmark:network-streams \
+    --direction guest_to_host \
+    --streams 8 \
+    --seconds 20 \
+    --iterations 6 \
+    --tcp-info-interval-ms 250 \
+    --tcp-congestion "$algorithm" || break
+done
+```
+
+Each invocation creates its own evidence archive and retains alternating
+Apple/krun order. Compare the paired krun/Apple ratios within each archive, not
+only absolute throughput between archives. The algorithms are tested in separate
+runs, so an apparent improvement still needs repeat confirmation in reverse
+algorithm order; this is not a four-way randomized experiment.
+
+`--tcp-congestion` defaults to `default`, leaving socket behavior unchanged.
+An explicit `bbr`, `cubic`, or `reno` applies `TCP_CONGESTION` to every guest
+sender socket **before connecting**, on both runtimes. It does not change sysctls,
+MTU, buffer sizes, libkrun, or the host receiver. There is no rebuild or restart.
+A host-to-guest-only run rejects this flag because it cannot control the macOS
+sender. With `--direction both`, only the guest-to-host half uses the selection.
+
+The guest verifies the selected algorithm, and the harness records and validates
+all stream selections in `<sample>-tcp-congestion.json`, including when live
+sampling is disabled. With TCP sampling enabled, the live flow records also have
+to match. Unsupported or disallowed algorithms fail explicitly (normally in
+warmup), listing registered guest algorithms; there is **no silent fallback**.
+Do not treat registered availability as proof that an unprivileged process may
+select an algorithm. Reno is used here because Linux always includes it; CUBIC depends on the guest
+kernel configuration. `--tcp-congestion cubic` is also supported when available.
+There is no automatic substitution between the controls.
+
+A smaller BBR congestion window or pacing estimate can be a consequence of lower
+observed delivery, not its cause. A narrower runtime gap under Reno would support
+an interaction between congestion control and the runtime path, not establish
+that BBR alone is defective. An unchanged gap would weaken that explanation.
+Do not retain a runtime or global congestion-control change from this test alone.

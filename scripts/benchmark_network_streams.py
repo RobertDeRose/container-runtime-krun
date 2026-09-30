@@ -81,6 +81,7 @@ streams = int(sys.argv[3])
 seconds = float(sys.argv[4])
 chunk_bytes = int(sys.argv[5])
 tcp_interval_ms = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+tcp_congestion = sys.argv[7] if len(sys.argv) > 7 else "default"
 if tcp_interval_ms != 0 and tcp_interval_ms < 100:
     raise SystemExit("TCP sampling interval must be zero or at least 100 ms")
 chunk = b"s" * chunk_bytes
@@ -151,6 +152,7 @@ tcp_stop = threading.Event()
 tcp_active = {}
 tcp_flows = {}
 tcp_sample_errors = []
+tcp_congestion_flows = {}
 
 def tcp_snapshot(sock, phase):
     started = time.perf_counter_ns()
@@ -207,12 +209,45 @@ def sample_tcp_flows():
                     tcp_sample_errors.append({"stream_id": stream_id, "error": repr(error)})
 
 
+def source_connection(stream_id):
+    # Leave the default connection path untouched. An override applies only to
+    # this sender socket, before connect; never change a guest/host sysctl.
+    if tcp_congestion == "default":
+        return socket.create_connection((host, port), timeout=30)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(30)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_CONGESTION,
+                            tcp_congestion.encode("ascii"))
+            actual = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_CONGESTION, 64)
+            actual = actual.split(b"\0", 1)[0].decode("ascii")
+        except OSError as error:
+            try:
+                available = Path("/proc/sys/net/ipv4/tcp_available_congestion_control").read_text().strip()
+            except OSError:
+                available = "unavailable"
+            raise RuntimeError(
+                f"cannot select TCP_CONGESTION={tcp_congestion!r}: {error}; "
+                f"registered algorithms: {available}; no fallback was used"
+            ) from error
+        if actual != tcp_congestion:
+            raise RuntimeError(f"requested TCP_CONGESTION={tcp_congestion!r}, got {actual!r}")
+        sock.connect((host, port))
+        with lock:
+            tcp_congestion_flows[stream_id] = {"stream_id": stream_id, "algorithm": actual}
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
 def worker(stream_id):
     sent = 0
     phase = "connect"
     recorded = False
     try:
-        with socket.create_connection((host, port), timeout=30) as sock:
+        with source_connection(stream_id) as sock:
             try:
                 sock.settimeout(30)
                 if tcp_interval_ms:
@@ -275,6 +310,10 @@ if tcp_sampler is not None:
     tcp_sampler.join(timeout=5)
     if tcp_sampler.is_alive():
         errors.append("TCP sampler did not terminate")
+tcp_congestion_evidence = {
+    "requested": tcp_congestion,
+    "flows": [tcp_congestion_flows[key] for key in sorted(tcp_congestion_flows)],
+} if tcp_congestion != "default" else None
 tcp_evidence = None
 if tcp_interval_ms:
     with tcp_lock:
@@ -292,6 +331,7 @@ if errors:
         "network_at_first_failure": failure_network,
         "errors": errors,
         **({"tcp_flow": tcp_evidence} if tcp_interval_ms else {}),
+        **({"tcp_congestion": tcp_congestion_evidence} if tcp_congestion_evidence else {}),
     }, sort_keys=True), file=sys.stderr, flush=True)
     raise SystemExit("; ".join(errors))
 byte_count = sum(item[0] for item in results)
@@ -306,6 +346,7 @@ print(json.dumps({
     "mib_per_second": byte_count / (1024 * 1024) / elapsed,
     "streams": streams,
     **({"tcp_flow": tcp_evidence} if tcp_interval_ms else {}),
+    **({"tcp_congestion": tcp_congestion_evidence} if tcp_congestion_evidence else {}),
 }, sort_keys=True))
 '''
 
@@ -449,6 +490,7 @@ class Benchmark:
         self.samples: list[Sample] = []
         self.failed = False
         self.tcp_info_interval_ms = 0
+        self.tcp_congestion = "default"
 
     def log(self, message: str) -> None:
         print(f"[network-streams] {message}", flush=True)
@@ -820,6 +862,8 @@ def save_tcp_flow_evidence(
     if len(flows) != streams:
         problems.append(f"expected {streams} TCP flows, got {len(flows)}")
     for flow in flows:
+        if bench.tcp_congestion != "default" and flow.get("congestion_control") != bench.tcp_congestion:
+            problems.append(f"unexpected live congestion algorithm for stream {flow['stream_id']}")
         snapshots = flow["snapshots"]
         for row in snapshots:
             try:
@@ -839,6 +883,34 @@ def save_tcp_flow_evidence(
         raise RuntimeError(f"incomplete TCP flow evidence; see {label}-tcp-flow.json")
 
 
+def save_tcp_congestion_evidence(
+    bench: Benchmark, endpoint: Endpoint, label: str,
+    payload: dict[str, object], streams: int,
+) -> None:
+    evidence = payload.get("tcp_congestion")
+    if not isinstance(evidence, dict):
+        raise RuntimeError("guest source did not export the requested TCP congestion selection")
+    evidence.update({"endpoint": asdict(endpoint), "label": label,
+                     "throughput_mib_per_second": payload.get("mib_per_second")})
+    problems = []
+    if evidence.get("requested") != bench.tcp_congestion:
+        problems.append("requested congestion algorithm does not match benchmark settings")
+    flows = evidence.get("flows", [])
+    if not isinstance(flows, list) or not all(isinstance(flow, dict) for flow in flows):
+        problems.append("invalid per-stream congestion selections")
+    elif (len(flows) != streams
+          or any(type(flow.get("stream_id")) is not int for flow in flows)
+          or {flow.get("stream_id") for flow in flows} != set(range(streams))
+          or any(flow.get("algorithm") != bench.tcp_congestion for flow in flows)):
+        problems.append("every stream must confirm the requested congestion algorithm")
+    evidence["validation_errors"] = problems
+    (bench.output / f"{label}-tcp-congestion.json").write_text(
+        json.dumps(evidence, indent=2) + "\n", encoding="utf-8",
+    )
+    if problems:
+        raise RuntimeError(f"invalid TCP congestion selection; see {label}-tcp-congestion.json")
+
+
 def guest_source(
     bench: Benchmark,
     endpoint: Endpoint,
@@ -856,11 +928,15 @@ def guest_source(
                 "container", "exec", endpoint.container_id,
                 "python3", "-c", GUEST_SOURCE,
                 host, str(port), str(streams), str(seconds), str(chunk_bytes),
-                *([str(bench.tcp_info_interval_ms)] if bench.tcp_info_interval_ms else []),
+                *([str(bench.tcp_info_interval_ms)]
+                  if bench.tcp_info_interval_ms or bench.tcp_congestion != "default" else []),
+                *([bench.tcp_congestion] if bench.tcp_congestion != "default" else []),
             ],
             timeout=max(bench.timeout, int(seconds) + 60),
         )
         payload = parse_json_line(result.stdout)
+        if bench.tcp_congestion != "default":
+            save_tcp_congestion_evidence(bench, endpoint, label, payload, streams)
         if bench.tcp_info_interval_ms:
             save_tcp_flow_evidence(bench, endpoint, label, payload, streams, seconds)
         return payload
@@ -1112,6 +1188,8 @@ def main() -> int:
     parser.add_argument("--direction", choices=("both", "guest_to_host", "host_to_guest"), default="both")
     parser.add_argument("--tcp-info-interval-ms", type=int, default=0,
                         help="Read guest TCP state every N ms (0 disables; minimum 100)")
+    parser.add_argument("--tcp-congestion", choices=("default", "bbr", "cubic", "reno"), default="default",
+                        help="Guest sender socket congestion control; default keeps the kernel choice")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
     parser.add_argument("--iterations", type=int, default=4)
@@ -1126,6 +1204,8 @@ def main() -> int:
         parser.error("tcp-info-interval-ms must be zero or at least 100")
     if args.tcp_info_interval_ms and args.direction == "host_to_guest":
         parser.error("TCP flow sampling requires the guest_to_host direction")
+    if args.tcp_congestion != "default" and args.direction == "host_to_guest":
+        parser.error("TCP congestion selection requires the guest_to_host direction")
     if args.runtime_a_cpus is not None and args.runtime_a_cpus <= 0:
         parser.error("runtime-a-cpus must be positive")
     if args.runtime_b_cpus is not None and args.runtime_b_cpus <= 0:
@@ -1145,6 +1225,7 @@ def main() -> int:
     args.result_root.mkdir(parents=True, exist_ok=True)
     bench = Benchmark(output, args.timeout)
     bench.tcp_info_interval_ms = args.tcp_info_interval_ms
+    bench.tcp_congestion = args.tcp_congestion
     endpoints: list[Endpoint] = []
     prefix = f"krun-streams-{token.lower()}"
 
@@ -1163,6 +1244,7 @@ def main() -> int:
         "streams": args.streams,
         "direction": args.direction,
         "tcp_info_interval_ms": args.tcp_info_interval_ms,
+        "tcp_congestion": args.tcp_congestion,
         "seconds": args.seconds,
         "warmup_seconds": args.warmup_seconds,
         "iterations": args.iterations,

@@ -56,6 +56,8 @@ if not network_stream_task.is_file():
 network_stream_task_text = network_stream_task.read_text()
 for required in (
     '#USAGE flag "--streams <streams>"',
+    '#USAGE flag "--tcp-congestion <algorithm>"',
+    '--tcp-congestion "${usage_tcp_congestion?}"',
     'default="1,4,8"',
     '#USAGE flag "--seconds <seconds>"',
     '#USAGE flag "--iterations <iterations>"',
