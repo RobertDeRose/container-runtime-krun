@@ -277,7 +277,9 @@ def main() -> int:
     }
 
     try:
-        endpoint = streams_bench.start_endpoint(bench, args.runtime, args.runtime, args.image, args.network, prefix)
+        endpoint = streams_bench.start_endpoint(
+            bench, args.runtime, args.runtime, args.image, args.network, prefix, slot=1
+        )
         endpoint_listing = process_listing()
         (output / "ps-after-endpoint.txt").write_text(endpoint_listing, encoding="utf-8")
         helper_pid = find_new_helper(before_helpers, endpoint_listing, endpoint.container_id)
