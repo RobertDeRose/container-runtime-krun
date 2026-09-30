@@ -187,7 +187,7 @@ for required in (
     '"guest_to_host"',
     '"host_to_guest"',
     '"127.0.0.1", endpoint.published_port',
-    'SinkServer(endpoint.gateway)',
+    'SinkServer(endpoint.gateway, evidence_path=evidence_path)',
     'threading.Barrier(streams + 1',
     'runtime_b_over_a',
 ):

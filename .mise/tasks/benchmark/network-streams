@@ -5,6 +5,8 @@
 #USAGE flag "--network <network>" help="Apple Container network" default="default"
 #USAGE flag "--image <image>" help="Python image used for benchmark endpoints" default="python:3.13-alpine"
 #USAGE flag "--streams <streams>" help="Comma-separated parallel stream counts" default="1,4,8"
+#USAGE flag "--direction <direction>" help="both, guest_to_host, or host_to_guest" default="both"
+#USAGE flag "--tcp-info-interval-ms <ms>" help="Guest TCP sampling interval; 0 disables, minimum 100 ms" default="0"
 #USAGE flag "--seconds <seconds>" help="Sustained duration per recorded sample" default="10"
 #USAGE flag "--warmup-seconds <seconds>" help="Warmup duration per runtime/direction/stream count" default="1"
 #USAGE flag "--iterations <iterations>" help="A/B -> B/A samples per direction and stream count" default="4"
@@ -20,6 +22,8 @@ exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/benchmark_networ
   --network "${usage_network?}" \
   --image "${usage_image?}" \
   --streams "${usage_streams?}" \
+  --direction "${usage_direction?}" \
+  --tcp-info-interval-ms "${usage_tcp_info_interval_ms?}" \
   --seconds "${usage_seconds?}" \
   --warmup-seconds "${usage_warmup_seconds?}" \
   --iterations "${usage_iterations?}" \

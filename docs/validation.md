@@ -425,3 +425,58 @@ mise run profile:network-guest-cpu-compare --streams 8 --seconds 20 --iterations
 Inspect the resulting archive before changing the RX notification experiment or
 repeating the full throughput benchmark. If Apple/VZ fails before krun is
 created, that run cannot measure the libkrun change.
+
+### Paired guest-to-host TCP flow evidence
+
+After establishing an uninstrumented throughput baseline, capture live sender TCP
+state for both Linux guests without changing the runtime or installing guest tools:
+
+```bash
+mise run benchmark:network-streams \
+  --direction guest_to_host \
+  --streams 1,4,8 \
+  --seconds 20 \
+  --iterations 6 \
+  --tcp-info-interval-ms 250
+```
+
+This keeps the existing alternating A/B -> B/A order and the same payload/trailer/
+byte-count-acknowledgement protocol. It requires only the profiling-script patch;
+there is no libkrun/helper rebuild or service restart. Sampling defaults to off.
+Omitting `--direction` retains the normal bidirectional benchmark. TCP capture
+applies only to guest-to-host transfers; it is rejected for a host-to-guest-only run.
+
+One background thread per guest sender reads `TCP_INFO` for each open stream at the
+requested interval (250 ms above; minimum 100 ms). Each connection is also sampled
+before sending, immediately after the payload interval, and after its acknowledgement.
+The per-chunk send loop is unchanged. Samples stay in memory until the transfer ends;
+there is no per-packet logging. This is an instrumented diagnostic, not a replacement
+for the uninstrumented throughput baseline. Sampling and Python thread scheduling
+can affect throughput; compare equally instrumented Apple/krun pairs.
+
+The usual `validation-results/container-runtime-krun-network-streams-*.tar.gz`
+archive now also contains `<sample>-tcp-flow.json` and `<sample>-host-sink.json`.
+TCP evidence includes guest kernel and byte order, stream endpoints, congestion
+control, initial send-buffer size, timestamped raw snapshots, and decoded fields.
+The host record preserves received byte counts and acknowledgement status. Missing
+TCP exports, capture errors, malformed snapshots, or absent live coverage in a long
+enough run fail explicitly rather than silently reporting a complete profile. Failed
+senders retain their partial raw samples in the existing `KRUN_STREAM_FAILURE` log.
+
+Decode only the Linux UAPI `struct tcp_info` layout, not the macOS socket layout.
+Tail fields unavailable from an older guest kernel remain `null`, not zero. Field
+names retain their Linux `tcpi_` names. Key interpretation rules:
+
+- `tcpi_rtt`, `tcpi_rttvar`, and `tcpi_min_rtt` are microseconds. The congestion
+  window (`tcpi_snd_cwnd`) and unacknowledged count (`tcpi_unacked`) are segments;
+  `tcpi_snd_wnd` is the peer's scaled advertised receive window in bytes.
+- `tcpi_total_retrans`, `tcpi_bytes_acked`, `tcpi_bytes_sent`, and
+  `tcpi_bytes_retrans` are cumulative counters. Subtract snapshots within the same
+  stream. Unacknowledged segments are not an exact outstanding-byte measurement.
+- `tcpi_busy_time`, `tcpi_rwnd_limited`, and `tcpi_sndbuf_limited` are cumulative
+  microseconds. Compare their deltas; the latter two indicate receive-window and
+  send-buffer limitation. Rate fields are bytes per second.
+
+Use `sending` samples for sustained-flow state, and the connected/payload-end/
+complete boundaries for cumulative deltas. Do not treat final post-acknowledgement
+window or unacknowledged values as representative of sustained transmission.

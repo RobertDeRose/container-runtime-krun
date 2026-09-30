@@ -80,6 +80,9 @@ port = int(sys.argv[2])
 streams = int(sys.argv[3])
 seconds = float(sys.argv[4])
 chunk_bytes = int(sys.argv[5])
+tcp_interval_ms = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+if tcp_interval_ms != 0 and tcp_interval_ms < 100:
+    raise SystemExit("TCP sampling interval must be zero or at least 100 ms")
 chunk = b"s" * chunk_bytes
 TRAILER_MAGIC = b"\x00KRUN_STREAM_END\x00"
 state = {}
@@ -140,6 +143,70 @@ def record_failure(stream_id, phase, sent, sock, error):
                     failure_network[name] = "ERROR: " + repr(read_error)
 
 
+# Opt-in, read-only sampling. The sender's per-chunk loop is unchanged.
+# One sampler handles all streams; the lock only protects setup/teardown
+# and infrequent getsockopt calls, never payload transmission.
+tcp_lock = threading.Lock()
+tcp_stop = threading.Event()
+tcp_active = {}
+tcp_flows = {}
+tcp_sample_errors = []
+
+def tcp_snapshot(sock, phase):
+    started = time.perf_counter_ns()
+    raw = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
+    finished = time.perf_counter_ns()
+    return {
+        "phase": phase,
+        "elapsed_seconds": (
+            (started - state["start_ns"]) / 1_000_000_000
+            if "start_ns" in state else None
+        ),
+        "getsockopt_ns": finished - started,
+        "tcp_info_hex": raw.hex(),
+    }
+
+def tcp_register(stream_id, sock):
+    # Fail explicitly before sending if the requested socket API is absent.
+    row = {
+        "stream_id": stream_id,
+        "local_address": sock.getsockname(),
+        "peer_address": sock.getpeername(),
+        "congestion_control": sock.getsockopt(
+            socket.IPPROTO_TCP, socket.TCP_CONGESTION, 64,
+        ).split(b"\0", 1)[0].decode("ascii", errors="replace"),
+        "send_buffer_bytes": sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF),
+        "snapshots": [tcp_snapshot(sock, "connected")],
+    }
+    with tcp_lock:
+        tcp_flows[stream_id] = row
+        tcp_active[stream_id] = (sock, "sending")
+
+def tcp_boundary(stream_id, phase, *, finished=False):
+    with tcp_lock:
+        active = tcp_active.get(stream_id)
+        if active is None:
+            return
+        sock, _ = active
+        try:
+            tcp_flows[stream_id]["snapshots"].append(tcp_snapshot(sock, phase))
+        except Exception as error:
+            tcp_sample_errors.append({"stream_id": stream_id, "error": repr(error)})
+        if finished:
+            del tcp_active[stream_id]
+        else:
+            tcp_active[stream_id] = (sock, "finishing")
+
+def sample_tcp_flows():
+    while not tcp_stop.wait(tcp_interval_ms / 1000):
+        with tcp_lock:
+            for stream_id, (sock, phase) in tcp_active.items():
+                try:
+                    tcp_flows[stream_id]["snapshots"].append(tcp_snapshot(sock, phase))
+                except Exception as error:
+                    tcp_sample_errors.append({"stream_id": stream_id, "error": repr(error)})
+
+
 def worker(stream_id):
     sent = 0
     phase = "connect"
@@ -148,6 +215,9 @@ def worker(stream_id):
         with socket.create_connection((host, port), timeout=30) as sock:
             try:
                 sock.settimeout(30)
+                if tcp_interval_ms:
+                    phase = "tcp_profile_setup"
+                    tcp_register(stream_id, sock)
                 phase = "start_barrier"
                 barrier.wait(timeout=30)
                 deadline = state["deadline_ns"]
@@ -156,6 +226,8 @@ def worker(stream_id):
                     sock.sendall(chunk)
                     sent += len(chunk)
                 send_end_ns = time.perf_counter_ns()
+                if tcp_interval_ms:
+                    tcp_boundary(stream_id, "payload_end")
                 phase = "send_trailer"
                 sock.sendall(TRAILER_MAGIC + struct.pack("!Q", sent))
                 phase = "receive_ack"
@@ -163,10 +235,14 @@ def worker(stream_id):
                 if received != sent:
                     raise RuntimeError(f"sink byte mismatch sent={sent} received={received}")
                 completion_end_ns = time.perf_counter_ns()
+                phase = "complete"
             except Exception as error:
                 record_failure(stream_id, phase, sent, sock, error)
                 recorded = True
                 raise
+            finally:
+                if tcp_interval_ms:
+                    tcp_boundary(stream_id, phase, finished=True)
         with lock:
             results.append((sent, send_end_ns, completion_end_ns))
     except Exception as error:
@@ -182,19 +258,40 @@ def worker(stream_id):
 threads = [threading.Thread(target=worker, args=(index,)) for index in range(streams)]
 for thread in threads:
     thread.start()
+tcp_sampler = None
 try:
     barrier.wait(timeout=30)
+    if tcp_interval_ms:
+        tcp_sampler = threading.Thread(target=sample_tcp_flows, daemon=True)
+        tcp_sampler.start()
 except threading.BrokenBarrierError:
     pass
 for thread in threads:
     thread.join(timeout=max(30, seconds + 30))
 if any(thread.is_alive() for thread in threads):
     errors.append("source worker did not terminate")
+tcp_stop.set()
+if tcp_sampler is not None:
+    tcp_sampler.join(timeout=5)
+    if tcp_sampler.is_alive():
+        errors.append("TCP sampler did not terminate")
+tcp_evidence = None
+if tcp_interval_ms:
+    with tcp_lock:
+        tcp_evidence = {
+            "schema_version": 1,
+            "interval_ms": tcp_interval_ms,
+            "byteorder": sys.byteorder,
+            "guest_kernel": __import__("os").uname().release,
+            "flows": [tcp_flows[key] for key in sorted(tcp_flows)],
+            "errors": list(tcp_sample_errors),
+        }
 if errors:
     print("KRUN_STREAM_FAILURE " + json.dumps({
         "streams": sorted(failures, key=lambda row: row["stream_id"]),
         "network_at_first_failure": failure_network,
         "errors": errors,
+        **({"tcp_flow": tcp_evidence} if tcp_interval_ms else {}),
     }, sort_keys=True), file=sys.stderr, flush=True)
     raise SystemExit("; ".join(errors))
 byte_count = sum(item[0] for item in results)
@@ -208,6 +305,7 @@ print(json.dumps({
     "completion_elapsed_seconds": completion_elapsed,
     "mib_per_second": byte_count / (1024 * 1024) / elapsed,
     "streams": streams,
+    **({"tcp_flow": tcp_evidence} if tcp_interval_ms else {}),
 }, sort_keys=True))
 '''
 
@@ -350,6 +448,7 @@ class Benchmark:
         self.active_containers: set[str] = set()
         self.samples: list[Sample] = []
         self.failed = False
+        self.tcp_info_interval_ms = 0
 
     def log(self, message: str) -> None:
         print(f"[network-streams] {message}", flush=True)
@@ -671,6 +770,75 @@ def capture_guest_network_failure(
             bench.log(f"network diagnostic {suffix} failed: {error}")
 
 
+# Linux UAPI struct tcp_info: fixed native-endian fields, not the host's
+# (macOS) TCP_CONNECTION_INFO layout. Each tail field is length-checked.
+# See include/uapi/linux/tcp.h in the Linux source. Values use UAPI units:
+# rtt/rttvar/min_rtt and *_time/*_limited are microseconds; rates are B/s;
+# snd_cwnd/unacked/sacked/lost/retrans are segments; *_wnd are bytes.
+TCP_INFO_FIELDS = {
+    "tcpi_state": (0, 1), "tcpi_ca_state": (1, 1),
+    "tcpi_snd_mss": (16, 4), "tcpi_unacked": (24, 4),
+    "tcpi_sacked": (28, 4), "tcpi_lost": (32, 4), "tcpi_retrans": (36, 4),
+    "tcpi_rtt": (68, 4), "tcpi_rttvar": (72, 4),
+    "tcpi_snd_ssthresh": (76, 4), "tcpi_snd_cwnd": (80, 4),
+    "tcpi_total_retrans": (100, 4), "tcpi_pacing_rate": (104, 8),
+    "tcpi_max_pacing_rate": (112, 8), "tcpi_bytes_acked": (120, 8),
+    "tcpi_segs_out": (136, 4), "tcpi_segs_in": (140, 4),
+    "tcpi_notsent_bytes": (144, 4), "tcpi_min_rtt": (148, 4),
+    "tcpi_data_segs_out": (156, 4), "tcpi_delivery_rate": (160, 8),
+    "tcpi_busy_time": (168, 8), "tcpi_rwnd_limited": (176, 8),
+    "tcpi_sndbuf_limited": (184, 8), "tcpi_bytes_sent": (200, 8),
+    "tcpi_bytes_retrans": (208, 8), "tcpi_snd_wnd": (228, 4),
+    "tcpi_rcv_wnd": (232, 4),
+}
+
+
+def decode_tcp_info(raw_hex: str, byteorder: str) -> dict[str, int | None]:
+    if byteorder not in ("little", "big"):
+        raise ValueError(f"unsupported guest byte order: {byteorder!r}")
+    raw = bytes.fromhex(raw_hex)
+    if len(raw) < 104:
+        raise ValueError(f"TCP_INFO is too short: {len(raw)} bytes")
+    return {
+        key: int.from_bytes(raw[offset:offset + size], byteorder)
+        if len(raw) >= offset + size else None
+        for key, (offset, size) in TCP_INFO_FIELDS.items()
+    }
+
+
+def save_tcp_flow_evidence(
+    bench: Benchmark, endpoint: Endpoint, label: str, payload: dict[str, object],
+    streams: int, seconds: float,
+) -> None:
+    evidence = payload.get("tcp_flow")
+    if not isinstance(evidence, dict):
+        raise RuntimeError("guest source did not export the requested TCP flow evidence")
+    evidence.update({"endpoint": asdict(endpoint), "label": label,
+                     "throughput_mib_per_second": payload.get("mib_per_second")})
+    problems = list(evidence.get("errors", []))
+    flows = evidence.get("flows", [])
+    if len(flows) != streams:
+        problems.append(f"expected {streams} TCP flows, got {len(flows)}")
+    for flow in flows:
+        snapshots = flow["snapshots"]
+        for row in snapshots:
+            try:
+                row["tcp_info"] = decode_tcp_info(row["tcp_info_hex"], evidence["byteorder"])
+            except (KeyError, TypeError, ValueError) as error:
+                row["decode_error"] = str(error)
+                problems.append(f"TCP_INFO decode failed for stream {flow['stream_id']}: {error}")
+        # Very short warmups may finish before the first sampling interval.
+        if seconds >= 2 * bench.tcp_info_interval_ms / 1000:
+            if not any(row["phase"] == "sending" and "tcp_info" in row for row in snapshots):
+                problems.append(f"no live send samples for stream {flow['stream_id']}")
+    evidence["validation_errors"] = problems
+    (bench.output / f"{label}-tcp-flow.json").write_text(
+        json.dumps(evidence, indent=2) + "\n", encoding="utf-8",
+    )
+    if problems:
+        raise RuntimeError(f"incomplete TCP flow evidence; see {label}-tcp-flow.json")
+
+
 def guest_source(
     bench: Benchmark,
     endpoint: Endpoint,
@@ -688,10 +856,14 @@ def guest_source(
                 "container", "exec", endpoint.container_id,
                 "python3", "-c", GUEST_SOURCE,
                 host, str(port), str(streams), str(seconds), str(chunk_bytes),
+                *([str(bench.tcp_info_interval_ms)] if bench.tcp_info_interval_ms else []),
             ],
             timeout=max(bench.timeout, int(seconds) + 60),
         )
-        return parse_json_line(result.stdout)
+        payload = parse_json_line(result.stdout)
+        if bench.tcp_info_interval_ms:
+            save_tcp_flow_evidence(bench, endpoint, label, payload, streams, seconds)
+        return payload
     except Exception:
         bench.log(f"capturing network evidence for {label}; the transfer will not be retried")
         try:
@@ -717,7 +889,10 @@ def run_direction(
             (bench.output / f"{label}.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
             return result
         if direction == "guest_to_host":
-            with SinkServer(endpoint.gateway) as sink:
+            evidence_path = (
+                bench.output / f"{label}-host-sink.json" if bench.tcp_info_interval_ms else None
+            )
+            with SinkServer(endpoint.gateway, evidence_path=evidence_path) as sink:
                 return guest_source(
                     bench, endpoint, endpoint.gateway, sink.port, streams, duration, chunk_bytes, label
                 )
@@ -934,6 +1109,9 @@ def main() -> int:
     parser.add_argument("--network", default="default")
     parser.add_argument("--image", default="python:3.13-alpine")
     parser.add_argument("--streams", type=parse_streams, default=parse_streams("1,4,8"))
+    parser.add_argument("--direction", choices=("both", "guest_to_host", "host_to_guest"), default="both")
+    parser.add_argument("--tcp-info-interval-ms", type=int, default=0,
+                        help="Read guest TCP state every N ms (0 disables; minimum 100)")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
     parser.add_argument("--iterations", type=int, default=4)
@@ -944,6 +1122,10 @@ def main() -> int:
 
     if args.seconds <= 0 or args.warmup_seconds <= 0 or args.iterations <= 0 or args.chunk_kib <= 0:
         parser.error("seconds, warmup-seconds, iterations, and chunk-kib must be positive")
+    if args.tcp_info_interval_ms != 0 and args.tcp_info_interval_ms < 100:
+        parser.error("tcp-info-interval-ms must be zero or at least 100")
+    if args.tcp_info_interval_ms and args.direction == "host_to_guest":
+        parser.error("TCP flow sampling requires the guest_to_host direction")
     if args.runtime_a_cpus is not None and args.runtime_a_cpus <= 0:
         parser.error("runtime-a-cpus must be positive")
     if args.runtime_b_cpus is not None and args.runtime_b_cpus <= 0:
@@ -962,6 +1144,7 @@ def main() -> int:
     archive = args.result_root / f"container-runtime-krun-network-streams-{token}.tar.gz"
     args.result_root.mkdir(parents=True, exist_ok=True)
     bench = Benchmark(output, args.timeout)
+    bench.tcp_info_interval_ms = args.tcp_info_interval_ms
     endpoints: list[Endpoint] = []
     prefix = f"krun-streams-{token.lower()}"
 
@@ -978,6 +1161,8 @@ def main() -> int:
         "network": args.network,
         "image": args.image,
         "streams": args.streams,
+        "direction": args.direction,
+        "tcp_info_interval_ms": args.tcp_info_interval_ms,
         "seconds": args.seconds,
         "warmup_seconds": args.warmup_seconds,
         "iterations": args.iterations,
@@ -1004,15 +1189,13 @@ def main() -> int:
         if args.control_marker is not None:
             args.control_marker.unlink(missing_ok=True)
 
+        directions = ("guest_to_host", "host_to_guest") if args.direction == "both" else (args.direction,)
         for streams in args.streams:
-            run_direction(
-                bench, endpoints, "guest_to_host", streams, args.seconds,
-                args.warmup_seconds, args.iterations, args.chunk_kib * 1024,
-            )
-            run_direction(
-                bench, endpoints, "host_to_guest", streams, args.seconds,
-                args.warmup_seconds, args.iterations, args.chunk_kib * 1024,
-            )
+            for direction in directions:
+                run_direction(
+                    bench, endpoints, direction, streams, args.seconds,
+                    args.warmup_seconds, args.iterations, args.chunk_kib * 1024,
+                )
     except Exception as error:
         bench.failed = True
         bench.log(f"fatal benchmark error: {error}")
