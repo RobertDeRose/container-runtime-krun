@@ -13,10 +13,14 @@ import sys
 import tarfile
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
 import benchmark_network_streams as streams_bench
+import native_vmnet_validation as native_validation
+import profile_network_guest_cpu as guest_profile
+from network_host_activity import HostActivity, ThreadReader
 
 
 HELPER_NAME = "container-krun-vmm-helper"
@@ -148,37 +152,43 @@ def run_sample(pid: int, seconds: int, interval_ms: int, output: Path) -> None:
         raise RuntimeError(f"sample failed with exit {result.returncode}")
 
 
-def start_top(pid: int, seconds: int, output: Path) -> subprocess.Popen[str]:
+def start_top(pid: int, seconds: int, output: Path, *, whole_host: bool = False) -> subprocess.Popen[str]:
     argv = [
         "/usr/bin/top",
         "-l",
         str(max(1, seconds)),
         "-s",
         "1",
-        "-pid",
-        str(pid),
+        *(["-o", "cpu", "-n", "20"] if whole_host else ["-pid", str(pid)]),
         "-stats",
         "pid,command,cpu,threads,mem,time",
     ]
-    stream = (output / "vmm-top.txt").open("w", encoding="utf-8")
-    proc = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT, text=True)
+    stream = (output / ("host-top.txt" if whole_host else "vmm-top.txt")).open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT, text=True)
+    except BaseException:
+        stream.close()
+        raise
     proc._profile_stream = stream  # type: ignore[attr-defined]
     return proc
 
 
-def finish_top(proc: subprocess.Popen[str], timeout: int) -> None:
+def finish_top(proc: subprocess.Popen[str], timeout: int) -> int:
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.terminate()
         try:
-            proc.wait(timeout=5)
+            return proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-    stream = getattr(proc, "_profile_stream", None)
-    if stream is not None:
-        stream.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            return 124
+    finally:
+        stream = getattr(proc, "_profile_stream", None)
+        if stream is not None:
+            stream.close()
 
 
 def run_profile_source(
@@ -191,7 +201,9 @@ def run_profile_source(
     error_holder: list[str],
 ) -> None:
     try:
-        with streams_bench.SinkServer(endpoint.gateway) as sink:
+        with streams_bench.SinkServer(
+            endpoint.gateway, evidence_path=bench.output / "profile-host-sink.json"
+        ) as sink:
             result_holder.update(
                 streams_bench.guest_source(
                     bench,
@@ -208,6 +220,99 @@ def run_profile_source(
         error_holder.append(repr(error))
 
 
+def capture_installed_provenance(output: Path, stage: str) -> dict[str, object]:
+    """Verify installed files, independently of the local checkout HEAD."""
+    manifest = (native_validation.TRUSTED / "lib/libkrun.provenance").read_text()
+    (output / f"installed-{stage}.provenance").write_text(manifest, encoding="utf-8")
+    values = native_validation.provenance(manifest)
+    binary = shutil.which("container")
+    if not binary:
+        raise RuntimeError("container CLI is unavailable")
+    cli = Path(binary).resolve()
+    install_root = os.environ.get("INSTALL_ROOT")
+    if not install_root:
+        if cli.parent.name != "bin":
+            raise RuntimeError("cannot derive installed runtime path; set INSTALL_ROOT")
+        install_root = str(cli.parent.parent)
+    plugin = Path(install_root) / "libexec/container-plugins/container-runtime-krun"
+    version = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=10, check=True)
+    evidence: dict[str, object] = {
+        "commit": values["commit"], "provenance": values, "files": [], "verified": False,
+        "container_cli": {"path": str(cli), "sha256": native_validation.digest(cli),
+                          "version": version.stdout.strip()},
+    }
+    try:
+        for path, key in (
+            (native_validation.LIBRARY, "sha256"),
+            (native_validation.HELPER, "helper_sha256"),
+            (plugin / "bin/container-runtime-krun", "runtime_sha256"),
+        ):
+            if not path.is_file():
+                raise RuntimeError(f"installed native image not found: {path}; select the matching container CLI/install root")
+            actual = native_validation.digest(path)
+            evidence["files"].append({"path": str(path), "sha256": actual, "recorded_sha256": values[key]})
+            if actual != values[key]:
+                raise RuntimeError(f"installed hash does not match provenance: {path}")
+        evidence["verified"] = True
+        return evidence
+    finally:
+        (output / f"installed-{stage}.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+
+@contextmanager
+def tx_attribution(output: Path, helper_pid: int, seconds: int):
+    """Correlate existing opt-in TX counters with external thread CPU readings."""
+    reader = ThreadReader()
+    if reader.executable(helper_pid) != str(native_validation.HELPER):
+        raise RuntimeError("TX attribution requires the protected native VMM helper")
+    helper = guest_profile.krun_helper_processes().get(helper_pid)
+    if helper is None:
+        raise RuntimeError(f"cannot find profiling log for VMM PID {helper_pid}")
+    shutil.copyfile(helper.config_path, output / "krun-vmm.json")
+    activity = HostActivity(output / "host-activity.json",
+                            {"vmm": helper_pid, "harness_and_sink": os.getpid()}, seconds, reader)
+    evidence: dict[str, object] = {"clock": "host monotonic nanoseconds"}
+    reset = False
+    primary_error = None
+    errors = []
+    try:
+        activity.start()
+        evidence["reset_requested_ns"] = time.monotonic_ns()
+        guest_profile.reset_tx_datapath(helper)
+        reset = True
+        evidence["reset_ack_ns"] = time.monotonic_ns()
+        yield
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if reset:
+            try:
+                evidence["snapshot_requested_ns"] = time.monotonic_ns()
+                evidence["counters"] = guest_profile.snapshot_tx_datapath(helper)
+                evidence["snapshot_ack_ns"] = time.monotonic_ns()
+            except Exception as error:
+                errors.append(f"TX snapshot: {error!r}")
+        for label, action in (
+            ("host activity", activity.finish),
+            ("VMM log", lambda: shutil.copyfile(helper.log_path, output / "krun-vmm.log")),
+        ):
+            try:
+                action()
+            except Exception as error:
+                errors.append(f"{label}: {error!r}")
+        evidence["errors"] = errors
+        evidence["primary_error"] = repr(primary_error) if primary_error else None
+        try:
+            (output / "tx-attribution.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        except OSError as error:
+            errors.append(f"TX evidence write: {error!r}")
+        if errors:
+            if primary_error is None:
+                raise RuntimeError("incomplete TX attribution: " + "; ".join(errors))
+            print("[network-profile] additional attribution failures: " + "; ".join(errors), file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", default="container-runtime-krun")
@@ -219,6 +324,8 @@ def main() -> int:
     parser.add_argument("--sample-delay", type=float, default=2.0)
     parser.add_argument("--sample-seconds", type=int, default=20)
     parser.add_argument("--sample-interval-ms", type=int, default=10)
+    parser.add_argument("--tx-attribution", action="store_true",
+                        help="Native krun only: verify installed files, capture TX counters and host thread CPU")
     parser.add_argument("--chunk-kib", type=int, default=256)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--result-root", type=Path, default=Path("validation-results"))
@@ -226,6 +333,8 @@ def main() -> int:
 
     if platform.system() != "Darwin":
         parser.error("profile:network-streams requires macOS")
+    if args.tx_attribution and args.runtime != "container-runtime-krun":
+        parser.error("TX attribution requires container-runtime-krun; Apple host profiling is not supported")
     if args.streams <= 0 or args.seconds <= 0 or args.warmup_seconds <= 0 or args.chunk_kib <= 0:
         parser.error("streams, seconds, warmup-seconds, and chunk-kib must be positive")
     if args.sample_delay < 0 or args.sample_seconds <= 0 or args.sample_interval_ms <= 0:
@@ -252,6 +361,10 @@ def main() -> int:
     prefix = f"krun-profile-{token.lower()}"
     endpoint: streams_bench.Endpoint | None = None
     failed = False
+    installed = None
+    source_thread = None
+    source_deadline = 0.0
+    error_holder: list[str] = []
 
     initial_listing = process_listing()
     (output / "ps-before-endpoint.txt").write_text(initial_listing, encoding="utf-8")
@@ -274,9 +387,14 @@ def main() -> int:
         "platform": platform.platform(),
         "machine": platform.machine(),
         "sample_path": shutil.which("sample") or "/usr/bin/sample",
+        "tx_attribution": args.tx_attribution,
+        "host_sink_pid": os.getpid(),
     }
 
     try:
+        if args.tx_attribution:
+            installed = capture_installed_provenance(output, "before")
+            metadata["installed_libkrun_commit"] = installed["commit"]
         endpoint = streams_bench.start_endpoint(
             bench, args.runtime, args.runtime, args.image, args.network, prefix, slot=1
         )
@@ -309,7 +427,6 @@ def main() -> int:
         capture_command(output, "vmm-threads-before.txt", thread_snapshot_argv(helper_pid))
 
         result_holder: dict[str, object] = {}
-        error_holder: list[str] = []
         source_thread = threading.Thread(
             target=run_profile_source,
             args=(
@@ -323,19 +440,32 @@ def main() -> int:
             ),
             daemon=True,
         )
+        source_deadline = time.monotonic() + args.seconds + args.timeout
         source_thread.start()
         time.sleep(args.sample_delay)
 
         (output / "ps-profile-start.txt").write_text(process_listing(), encoding="utf-8")
-        top_proc = start_top(helper_pid, args.sample_seconds, output)
-        try:
-            run_sample(helper_pid, args.sample_seconds, args.sample_interval_ms, output)
-            capture_command(output, "vmm-threads-during.txt", thread_snapshot_argv(helper_pid))
-        finally:
-            finish_top(top_proc, args.sample_seconds + 10)
+        attribution = tx_attribution(output, helper_pid, args.sample_seconds) if args.tx_attribution else nullcontext()
+        with attribution:
+            top_proc = start_top(helper_pid, args.sample_seconds, output, whole_host=args.tx_attribution)
+            sample_failed = True
+            try:
+                run_sample(helper_pid, args.sample_seconds, args.sample_interval_ms, output)
+                capture_command(output, "vmm-threads-during.txt", thread_snapshot_argv(helper_pid))
+                sample_failed = False
+            finally:
+                try:
+                    top_status = finish_top(top_proc, args.sample_seconds + 10)
+                    (output / "top-status.txt").write_text(f"exit_status={top_status}\n", encoding="utf-8")
+                    if args.tx_attribution and top_status != 0:
+                        raise RuntimeError(f"host top capture failed with exit {top_status}")
+                except Exception as error:
+                    if not sample_failed:
+                        raise
+                    print(f"[network-profile] additional top failure: {error!r}", file=sys.stderr)
 
         (output / "ps-profile-end.txt").write_text(process_listing(), encoding="utf-8")
-        source_thread.join(timeout=args.seconds + args.timeout)
+        source_thread.join(timeout=max(0, source_deadline - time.monotonic()))
         if source_thread.is_alive():
             raise RuntimeError("profile source did not terminate")
         if error_holder:
@@ -357,6 +487,23 @@ def main() -> int:
         bench.log(f"profile failed: {error}")
         (output / "fatal-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
     finally:
+        # A profiler/collector failure must not archive while the source and its
+        # sink are still writing evidence. Keep the existing bounded source wait.
+        if source_thread is not None and source_thread.ident is not None:
+            source_thread.join(timeout=max(0, source_deadline - time.monotonic()))
+            if source_thread.is_alive():
+                failed = True
+                error_holder.append("profile source did not terminate before cleanup")
+        if error_holder:
+            failed = True
+            (output / "source-errors.json").write_text(json.dumps(error_holder, indent=2) + "\n", encoding="utf-8")
+        if installed is not None:
+            try:
+                if capture_installed_provenance(output, "after") != installed:
+                    raise RuntimeError("installed files/provenance changed during profiling")
+            except Exception as error:
+                failed = True
+                (output / "installation-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
         metadata["result"] = "FAIL" if failed else "PASS"
         (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         bench.cleanup()

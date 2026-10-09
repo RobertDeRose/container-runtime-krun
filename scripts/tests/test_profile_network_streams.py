@@ -34,6 +34,37 @@ class ProfilerCommandTests(unittest.TestCase):
         self.assertNotIn("tid", " ".join(argv))
         self.assertIn("%cpu", argv[-1])
 
+    def test_top_attribution_captures_busiest_host_processes_not_only_vmm(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(profile.subprocess, "Popen") as popen:
+            output = pathlib.Path(directory)
+            proc = profile.start_top(123, 20, output, whole_host=True)
+            argv = popen.call_args.args[0]
+            self.assertNotIn("-pid", argv)
+            self.assertEqual(argv[argv.index("-n") + 1], "20")
+            self.assertTrue((output / "host-top.txt").exists())
+            proc._profile_stream.close()
+
+    def test_finish_top_reports_exit_and_timeout_and_closes_output(self):
+        for waits, expected in (([7], 7), ([subprocess.TimeoutExpired("top", 1), -15], 124),
+                                ([subprocess.TimeoutExpired("top", 1), subprocess.TimeoutExpired("top", 5), -9], 124)):
+            with self.subTest(waits=waits):
+                proc = mock.Mock()
+                proc.wait.side_effect = waits
+                self.assertEqual(profile.finish_top(proc, 1), expected)
+                proc._profile_stream.close.assert_called_once()
+                if expected == 124:
+                    proc.terminate.assert_called_once()
+                if len(waits) == 3:
+                    proc.kill.assert_called_once()
+
+    def test_attribution_rejects_apple_before_authorization(self):
+        with mock.patch.object(sys, "argv", [str(SCRIPT), "--runtime", "container-runtime-linux", "--tx-attribution"]), \
+                mock.patch.object(profile.platform, "system", return_value="Darwin"), \
+                mock.patch.object(profile, "authorize_profiler") as authorize, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            profile.main()
+        authorize.assert_not_called()
+
     def test_sample_argv_uses_requested_interval(self):
         argv = profile.sample_argv(123, 20, 10, pathlib.Path("sample.txt"))
         self.assertEqual(
@@ -95,7 +126,7 @@ class ProcessDiscoveryTests(unittest.TestCase):
 
 
 class ProfilerWorkflowTests(unittest.TestCase):
-    def run_profile(self, failure=None):
+    def run_profile(self, failure=None, *, attribution=False):
         """Run main with real benchmark helpers; replace only external commands.
 
         Container exec runs the exact embedded sender against a loopback sink.
@@ -160,10 +191,14 @@ class ProfilerWorkflowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            argv = [str(SCRIPT), "--runtime", "fixture-runtime", "--network", "fixture-network",
+            runtime = "container-runtime-krun" if attribution else "fixture-runtime"
+            argv = [str(SCRIPT), "--runtime", runtime, "--network", "fixture-network",
                     "--image", "fixture:image", "--streams", "2", "--seconds", "1.1",
                     "--warmup-seconds", "0.01", "--sample-delay", "0", "--sample-seconds", "1",
                     "--chunk-kib", "1", "--timeout", "10", "--result-root", directory]
+            if attribution:
+                argv.append("--tx-attribution")
+            installation = {"commit": "installed-commit", "verified": True}
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(sys, "argv", argv))
                 stack.enter_context(mock.patch.object(profile.platform, "system", return_value="Darwin"))
@@ -174,9 +209,20 @@ class ProfilerWorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(profile, "process_listing", side_effect=listing))
                 stack.enter_context(mock.patch.object(profile, "capture_command", autospec=True, side_effect=capture))
                 start_top = stack.enter_context(mock.patch.object(profile, "start_top", autospec=True))
-                finish_top = stack.enter_context(mock.patch.object(profile, "finish_top", autospec=True))
+                finish_top = stack.enter_context(mock.patch.object(profile, "finish_top", autospec=True,
+                                                                  return_value=7 if failure in ("top", "sample_and_top") else 0))
+                provenance = stack.enter_context(mock.patch.object(profile, "capture_installed_provenance",
+                                                                   autospec=True, return_value=installation))
+                attribution_capture = stack.enter_context(mock.patch.object(profile, "tx_attribution",
+                                                                            autospec=True))
+                # Isolated collector tests exercise the real attribution context.
+                attribution_capture.return_value = contextlib.nullcontext()
+                if failure in ("sample", "sample_and_top"):
+                    sample_failure = RuntimeError("injected sample failure")
+                else:
+                    sample_failure = None
                 run_sample = stack.enter_context(mock.patch.object(profile, "run_sample", autospec=True,
-                                                                  side_effect=sample))
+                                                                  side_effect=sample_failure or sample))
                 stack.enter_context(mock.patch.object(profile.streams_bench, "git_head", return_value="test"))
                 stack.enter_context(mock.patch.object(profile.streams_bench, "capture_guest_network_failure",
                                                       autospec=True))
@@ -194,6 +240,7 @@ class ProfilerWorkflowTests(unittest.TestCase):
                 self.assertEqual(archived_metadata["result"], "PASS" if status == 0 else "FAIL")
                 if status == 0:
                     self.assertIn(f"{output.name}/vmm-sample.txt", archive.getnames())
+                    self.assertIn(f"{output.name}/profile-host-sink.json", archive.getnames())
                     for name in ("warmup-result.json", "profile-result.json"):
                         result = json.load(archive.extractfile(f"{output.name}/{name}"))
                         self.assertGreater(result["bytes"], 0)
@@ -204,7 +251,7 @@ class ProfilerWorkflowTests(unittest.TestCase):
             self.assertEqual(len(started), 1, error)
             self.assertTrue(started[0].endswith("-r1"))
             start = next(argv for argv in commands if argv[1] == "run")
-            self.assertEqual(start[start.index("--runtime") + 1], "fixture-runtime")
+            self.assertEqual(start[start.index("--runtime") + 1], runtime)
             self.assertEqual(start[start.index("--network") + 1], "fixture-network")
             self.assertIn("fixture:image", start)
             self.assertEqual(commands[-1], ["container", "delete", "--force", started[0]])
@@ -216,6 +263,15 @@ class ProfilerWorkflowTests(unittest.TestCase):
                 run_sample.assert_called_once()
                 finish_top.assert_called_once_with(start_top.return_value, 11)
                 self.assertEqual(metadata["helper_pid"], 22)
+                self.assertEqual(start_top.call_args.kwargs["whole_host"], attribution)
+            if attribution:
+                self.assertEqual(provenance.call_args_list, [mock.call(output, "before"), mock.call(output, "after")])
+                self.assertEqual(metadata["installed_libkrun_commit"], "installed-commit")
+                if failure not in ("start", "warmup"):
+                    attribution_capture.assert_called_once_with(output, 22, 1)
+            else:
+                provenance.assert_not_called()
+                attribution_capture.assert_not_called()
             return status, error
 
     def test_main_uses_current_helpers_through_startup_transfer_and_archive(self):
@@ -237,6 +293,26 @@ class ProfilerWorkflowTests(unittest.TestCase):
         status, error = self.run_profile(failure="source")
         self.assertEqual(status, 1)
         self.assertIn("profile-guest-to-host-source failed with exit 1", error)
+
+    def test_main_enables_attribution_without_changing_loopback_sender(self):
+        status, error = self.run_profile(attribution=True)
+        self.assertEqual(status, 0, error)
+
+    def test_main_archives_sample_failure_and_finishes_top(self):
+        status, error = self.run_profile(failure="sample", attribution=True)
+        self.assertEqual(status, 1)
+        self.assertIn("injected sample failure", error)
+
+    def test_main_rejects_failed_whole_host_capture(self):
+        status, error = self.run_profile(failure="top", attribution=True)
+        self.assertEqual(status, 1)
+        self.assertIn("host top capture failed with exit 7", error)
+
+    def test_top_failure_does_not_replace_sample_error(self):
+        status, error = self.run_profile(failure="sample_and_top", attribution=True)
+        self.assertEqual(status, 1)
+        self.assertIn("injected sample failure", error)
+        self.assertNotIn("host top capture failed", error)
 
 
 if __name__ == "__main__":

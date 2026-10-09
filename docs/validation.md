@@ -481,6 +481,81 @@ Use `sending` samples for sustained-flow state, and the connected/payload-end/
 complete boundaries for cumulative deltas. Do not treat final post-acknowledgement
 window or unacknowledged values as representative of sustained transmission.
 
+### External TX attribution without a libkrun rebuild
+
+Keep the installed datapath unchanged. Select the CLI/install root that owns the
+native plugin. For the September baseline this is Container 1.4.1; use
+`export MISE_CONTAINER_VERSION=1.4.1` before the commands below when reproducing
+that installation. A globally selected newer CLI may not own the existing plugin.
+This selects a CLI, not a service restart or downgrade. Do not disrupt another
+workload's running service to collect evidence.
+
+On an otherwise quiet host, first collect an uninstrumented paired P8 baseline:
+
+```bash
+mise run benchmark:network-streams \
+  --direction guest_to_host --streams 8 --seconds 20 --iterations 6
+```
+
+Then capture native krun's existing opt-in TX counters alongside external host
+CPU observations:
+
+```bash
+mise run profile:network-streams \
+  --tx-attribution --streams 8 --seconds 30 \
+  --sample-delay 2 --sample-seconds 20
+```
+
+This requests sudo authorization for the existing macOS stack sampler. It does
+not build, install, restart services, change the guest, or change networking,
+queue formats, offloads, batching, IRQ delivery, or scheduling. Run only when
+unrelated builds and VM workloads are quiescent; do not stop other users' work
+just to collect a profile. This is an instrumented diagnostic, not a paired
+throughput result. The host profiler still discovers the krun helper; it does
+**not** support an Apple/VZ host profile merely by changing `--runtime`.
+
+The attribution flag adds these files to the normal archive:
+
+- `installed-before/after.provenance` and `installed-before/after.json`: protected
+  libkrun/helper and installed runtime hashes verified against the manifest,
+  before VM startup and before cleanup. `installed_libkrun_commit` in metadata
+  is independent of the local checkout's `libkrun_head`. Mismatches, dirty-source
+  manifests, or changes during collection fail the run. The selected CLI's
+  resolved path, version, and hash are recorded too. Set `INSTALL_ROOT` if
+  the selected CLI is not installed under `<root>/bin/container`; that override
+  does not itself select a compatible CLI or service.
+- `tx-attribution.json`: existing libkrun TX counters, with host-monotonic bounds
+  for reset request/acknowledgement and snapshot request/acknowledgement. These
+  counters cover the sampling window, not the entire 30-second transfer. Reset
+  enables the existing 1-in-64 timing instrumentation; snapshot disables it.
+- `host-activity.json`: one external libproc thread sweep per second for the VMM
+  and the Python harness/host sink, raw cumulative user/system nanoseconds and
+  instantaneous states, plus consecutive-observation CPU deltas. Coverage is
+  bounded. New/departed/renamed/counter-reset threads have no interval estimate,
+  not zero CPU. Python CPU includes orchestration and collector overhead.
+- `host-top.txt`: whole-host load, memory, and the busiest 20 processes, rather
+  than a VMM-only filter. `top-status.txt` records completion; failed or timed-out
+  top/CPU/counter capture cannot become an attribution PASS.
+- `krun-vmm.json`, `krun-vmm.log`, and `profile-host-sink.json`: native configuration,
+  signal acknowledgements/counters, and completed byte-count/trailer/ACK evidence.
+  Source and collector failures are preserved independently before cleanup.
+
+Compare the named `virtio-net worker` CPU deltas with its wall-time stack
+residency in `vmm-sample.txt`. High syscall residency with low CPU consumption
+supports waiting/preemption; sustained high CPU plus TX backlog supports service
+cost. Neither observation alone identifies a specific kernel lock or backpressure
+mechanism. Libproc's **legacy thread handle is not `sample`'s `Thread_<id>`**:
+correlate named threads, and do not assign anonymous bridge threads by guessing IDs.
+The `running` state includes runnable threads; it does not measure scheduler
+latency. Existing `notify_to_kqueue_ready` timestamps are userspace observations
+after the wait returns, not kernel event-ready timestamps.
+
+This first-stage collector does **not** measure individual syscall durations,
+bridge packet progress, or queue-depth distributions. If CPU versus wall-time
+still leaves the cause ambiguous, use a bounded system scheduling trace or a
+separate justified instrumentation patch before changing the datapath. Do not
+resurrect reverted direct-TX, ring, IRQ, or QoS experiments from stack percentages.
+
 ### Socket-only congestion-control comparison
 
 When a TCP profile shows no meaningful loss or window/buffer limitation, compare

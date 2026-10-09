@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -172,6 +173,17 @@ class HostFailureTests(unittest.TestCase):
                 with bench.SinkServer("127.0.0.1", evidence_path=path) as sink:
                     with bench.socket.create_connection(("127.0.0.1", sink.port), timeout=2) as source:
                         source.sendall(b"s" * 1024)
+                    # Closing the listener before its accept thread runs can
+                    # discard this pending connection. Wait for EOF evidence;
+                    # retain the required failure and exact wire-byte checks.
+                    deadline = time.monotonic() + 2
+                    while True:
+                        with sink.results_lock:
+                            if sink.connections:
+                                break
+                        if time.monotonic() >= deadline:
+                            self.fail("sink did not record the closed source")
+                        time.sleep(0.01)
             record = json.loads(path.read_text())["connections"][0]
             self.assertEqual(record["wire_bytes"], 1024)
             self.assertEqual(record["phase"], "receive_payload")
