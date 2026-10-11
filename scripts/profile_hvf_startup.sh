@@ -196,7 +196,7 @@ if ((INSTALL_KRUN)); then
   # because its only dependency is release:build, which has already been run without the libkrun graph.
   run_bounded "$INSTALL_TIMEOUT_SECONDS" mise run --skip-deps release:build
   run_bounded "$INSTALL_TIMEOUT_SECONDS" mise run --skip-deps sign
-  build_dir=".build/arm64-apple-macosx/release"
+  build_dir=".build/release"
   runtime_binary="$build_dir/container-runtime-krun"
   helper_binary="$build_dir/container-krun-vmm-helper"
   [[ -x "$runtime_binary" ]] || { echo "runtime release binary is missing" >&2; exit 1; }

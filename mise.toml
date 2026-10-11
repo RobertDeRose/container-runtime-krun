@@ -13,8 +13,8 @@ LIBKRUN_FEATURES = "BLK=1 NET=1"
 description = "Build the runtime in debug mode"
 sources = ["Package.swift", "Package.resolved", "Sources/**/*"]
 outputs = [
-  ".build/arm64-apple-macosx/debug/container-runtime-krun",
-  ".build/arm64-apple-macosx/debug/container-krun-vmm-helper",
+  ".build/debug/container-runtime-krun",
+  ".build/debug/container-krun-vmm-helper",
 ]
 run = "swift build --force-resolved-versions"
 
@@ -26,8 +26,8 @@ run = "scripts/build_native_libkrun.sh"
 description = "Build the arm64 runtime release binaries"
 sources = ["Package.swift", "Package.resolved", "Sources/**/*"]
 outputs = [
-  ".build/arm64-apple-macosx/release/container-runtime-krun",
-  ".build/arm64-apple-macosx/release/container-krun-vmm-helper",
+  ".build/release/container-runtime-krun",
+  ".build/release/container-krun-vmm-helper",
 ]
 run = "swift build --force-resolved-versions -c release --arch arm64"
 
@@ -35,16 +35,16 @@ run = "swift build --force-resolved-versions -c release --arch arm64"
 description = "Ad-hoc sign the release binaries"
 depends = ["release:build"]
 sources = [
-  ".build/arm64-apple-macosx/release/container-runtime-krun",
-  ".build/arm64-apple-macosx/release/container-krun-vmm-helper",
+  ".build/release/container-runtime-krun",
+  ".build/release/container-krun-vmm-helper",
   "signing/hypervisor.entitlements",
 ]
-outputs = [".build/arm64-apple-macosx/release/.container-runtime-krun-signed"]
+outputs = [".build/release/.container-runtime-krun-signed"]
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
-build_dir="$MISE_PROJECT_ROOT/.build/arm64-apple-macosx/release"
+build_dir="$MISE_PROJECT_ROOT/.build/release"
 codesign --force --sign - "$build_dir/container-runtime-krun"
 codesign --force --sign - --entitlements "$MISE_PROJECT_ROOT/signing/hypervisor.entitlements" \
   "$build_dir/container-krun-vmm-helper"

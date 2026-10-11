@@ -20,7 +20,7 @@ trusted="/Library/PrivilegedHelperTools/com.github.robertderose.container-runtim
 sudoers="/etc/sudoers.d/container-runtime-krun-native-vmnet"
 user="$(id -un)"
 case "$user" in ''|*[!A-Za-z0-9._-]*) echo "unsupported sudoers user name: $user" >&2; exit 1;; esac
-build="$root/.build/arm64-apple-macosx/release"
+build="$root/.build/release"
 dylib="$source_dir/target/release/libkrun.1.19.4.dylib"
 provenance="$source_dir/target/release/native-vmnet.provenance"
 source_status() {
