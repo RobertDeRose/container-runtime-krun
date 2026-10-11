@@ -2,8 +2,8 @@
 
 import PackageDescription
 
-let containerRevision = "9a8917ca2da5cd6ba059b9ba5ca5a74892e9bb7d"
-let containerizationVersion = Version(0, 45, 0)
+let containerRevision = "d265d669ecae041bf338cb3b39c4118316d138f0"
+let containerizationVersion = Version(0, 47, 0)
 let grpcSwiftVersion = Version(2, 4, 2)
 let swiftNIOVersion = Version(2, 101, 3)
 let swiftSystemVersion = Version(1, 7, 4)

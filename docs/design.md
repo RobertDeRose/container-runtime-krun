@@ -113,7 +113,7 @@ receives Local Network permission.
 
 ## Process lifecycle
 
-The runtime constructs OCI specs directly because `LinuxProcessConfiguration.toOCI()` is package-scoped in Containerization 0.45.0.
+The runtime constructs OCI specs directly because `LinuxProcessConfiguration.toOCI()` is package-scoped in Containerization 0.47.0.
 
 The generated spec preserves the stock runtime's important baseline:
 
@@ -215,9 +215,9 @@ Rosetta is deliberately excluded from the active roadmap. If x86_64 emulation is
 
 ### v0.5: storage lifecycle, multiple networks, and measurement
 
-Live export follows Apple's Container 1.4.1 runtime contract. Containerization 0.45 translates the container-relative `/` freeze request to the mounted guest rootfs path before calling vminitd; this runtime talks to vminitd directly, so it freezes that same mounted rootfs path explicitly, copies the root ext4 image on the host, and thaws on both success and copy failure. `FIFREEZE` synchronizes the target filesystem before returning, so no additional guest protocol or global `sync` is required. Booted-but-not-started containers can be copied without a freeze. Attached volumes remain separate and are not folded into the exported root filesystem image.
+Live export follows Apple's Container 1.5.0 runtime contract. Containerization 0.47 translates the container-relative `/` freeze request to the mounted guest rootfs path before calling vminitd; this runtime talks to vminitd directly, so it freezes that same mounted rootfs path explicitly, copies the root ext4 image on the host, and thaws on both success and copy failure. `FIFREEZE` synchronizes the target filesystem before returning, so no additional guest protocol or global `sync` is required. Booted-but-not-started containers can be copied without a freeze. Attached volumes remain separate and are not folded into the exported root filesystem image.
 
-Container 1.4.1 filesystem cleaning is implemented through the runtime `clean` route. The runtime asks vminitd to trim `/` when the rootfs is writable and each writable block-backed mount at its container destination. Read-only filesystems are skipped, and any trim failure is returned to the caller rather than reporting a false success.
+Container 1.5.0 filesystem cleaning is implemented through the runtime `clean` route. The runtime asks vminitd to trim `/` when the rootfs is writable and each writable block-backed mount at its container destination. Read-only filesystems are skipped, and any trim failure is returned to the caller rather than reporting a false success.
 
 The init process always has stdout/stderr connected to a serialized bundle log sink, including detached containers. Attached output is teed to both the caller and the persistent log; exec-process output remains live-only. Apple Container continues to own the `container logs` surface and combines this `stdio.log` with the existing VM boot log.
 

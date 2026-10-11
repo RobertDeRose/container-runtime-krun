@@ -2,7 +2,7 @@
 
 This development slice requires macOS 26 or newer, a macOS 26+ SDK, and the
 coordinated libkrun patch applied to the managed pinned checkout. It targets the unmodified Apple
-Container 1.4.1 CLI. It does not use the old direct-bridge WIP branch.
+Container 1.5.0 CLI. It does not use the old direct-bridge WIP branch.
 
 The runtime still asks Apple's network service for an `allocationOnly` attachment
 and keeps its XPC allocation session open. Apple chooses the address, MAC, hostname,
@@ -152,7 +152,7 @@ Use `--skip-regression` only while iterating on an acceptance failure; a complet
 run must omit it. Every subcollector remains independently archived by its existing
 script, while the acceptance archive records their command output/status.
 
-The stock Container 1.4.1 startup-only PTY diagnostic may warn during the runtime
+The stock Container startup-only PTY diagnostic (observed with 1.4.1) may warn during the runtime
 regression; established-session resize remains mandatory. Native validation does
 not weaken or replace that test.
 

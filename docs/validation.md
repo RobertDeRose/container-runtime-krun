@@ -315,7 +315,7 @@ Raw TSV samples and a summary table cover startup, exec, deterministic CPU work,
 
 ## Gate 16: persistent logs and filesystem trim
 
-Validate the two remaining Container 1.4.1 runtime-parity surfaces with:
+Validate the two remaining Container 1.5.0 runtime-parity surfaces with:
 
 ```bash
 scripts/validate_logs_clean.sh --install
@@ -483,12 +483,11 @@ window or unacknowledged values as representative of sustained transmission.
 
 ### External TX attribution without a libkrun rebuild
 
-Keep the installed datapath unchanged. Select the CLI/install root that owns the
-native plugin. For the September baseline this is Container 1.4.1; use
-`export MISE_CONTAINER_VERSION=1.4.1` before the commands below when reproducing
-that installation. A globally selected newer CLI may not own the existing plugin.
-This selects a CLI, not a service restart or downgrade. Do not disrupt another
-workload's running service to collect evidence.
+Keep the installed datapath unchanged. Use the latest `container` CLI, with the
+native plugin installed under its install root. The CLI must match the running
+container service, which discovers plugins only when it starts; a plugin added
+afterwards is reported as `unable to locate runtime plugin` until the service is
+restarted. Do not disrupt another workload's running service to collect evidence.
 
 On an otherwise quiet host, first collect an uninstrumented paired P8 baseline:
 
