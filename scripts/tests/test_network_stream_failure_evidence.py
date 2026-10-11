@@ -8,7 +8,6 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 
@@ -173,22 +172,29 @@ class HostFailureTests(unittest.TestCase):
                 with bench.SinkServer("127.0.0.1", evidence_path=path) as sink:
                     with bench.socket.create_connection(("127.0.0.1", sink.port), timeout=2) as source:
                         source.sendall(b"s" * 1024)
-                    # Closing the listener before its accept thread runs can
-                    # discard this pending connection. Wait for EOF evidence;
-                    # retain the required failure and exact wire-byte checks.
-                    deadline = time.monotonic() + 2
-                    while True:
-                        with sink.results_lock:
-                            if sink.connections:
-                                break
-                        if time.monotonic() >= deadline:
-                            self.fail("sink did not record the closed source")
-                        time.sleep(0.01)
             record = json.loads(path.read_text())["connections"][0]
             self.assertEqual(record["wire_bytes"], 1024)
             self.assertEqual(record["phase"], "receive_payload")
             self.assertFalse(record["ack_sent"])
             self.assertIn("source closed before stream trailer", record["error"])
+
+    def test_close_records_connection_still_in_listen_backlog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "sink.json"
+            with self.assertRaisesRegex(RuntimeError, "host sink failure"):
+                with bench.SinkServer("127.0.0.1", evidence_path=path) as sink:
+                    # Stop the accept loop first so the connection stays queued.
+                    sink.stop_event.set()
+                    sink.thread.join(timeout=2)
+                    self.assertFalse(sink.thread.is_alive())
+                    with bench.socket.create_connection(("127.0.0.1", sink.port), timeout=2) as source:
+                        source.sendall(b"s" * 1024)
+            evidence = json.loads(path.read_text())
+            self.assertEqual(len(evidence["connections"]), 1)
+            record = evidence["connections"][0]
+            self.assertEqual(record["wire_bytes"], 1024)
+            self.assertIn("source closed before stream trailer", record["error"])
+            self.assertEqual(evidence["unfinished_workers"], 0)
 
     def test_exact_guest_program_round_trips_without_success_diagnostic_output(self):
         with tempfile.TemporaryDirectory() as directory:

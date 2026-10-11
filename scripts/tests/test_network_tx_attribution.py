@@ -61,7 +61,8 @@ class InstalledProvenanceTests(unittest.TestCase):
         self.library = self.trusted / "lib/libkrun.dylib"
         self.helper = self.trusted / "bin/container-krun-vmm-helper"
         runtime = self.root / "libexec/container-plugins/container-runtime-krun/bin/container-runtime-krun"
-        for path in (self.library, self.helper, runtime):
+        plugin_library = runtime.parents[1] / "lib/libkrun.dylib"
+        for path in (self.library, self.helper, runtime, plugin_library):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(path.name.encode())
         self.manifest = self.trusted / "lib/libkrun.provenance"
@@ -84,7 +85,7 @@ class InstalledProvenanceTests(unittest.TestCase):
         evidence = profile.capture_installed_provenance(self.output, "before")
         self.assertTrue(evidence["verified"])
         self.assertEqual(evidence["commit"], "a" * 40)
-        self.assertEqual(len(evidence["files"]), 3)
+        self.assertEqual(len(evidence["files"]), 4)
         self.assertEqual(evidence["container_cli"]["version"], "container CLI version fixture")
         self.assertEqual(evidence["container_cli"]["sha256"], hashlib.sha256(self.cli.read_bytes()).hexdigest())
         self.assertEqual(json.loads((self.output / "installed-before.json").read_text()), evidence)
@@ -123,7 +124,8 @@ class InstalledProvenanceTests(unittest.TestCase):
 
 
 class AttributionContextTests(unittest.TestCase):
-    def collect(self, primary=False, snapshot_failure=False, reset_failure=False, cpu_failure=False):
+    def collect(self, primary=False, snapshot_failure=False, reset_failure=False, cpu_failure=False,
+                hold=0.0):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory)
             config = output / "source-config.json"
@@ -132,16 +134,12 @@ class AttributionContextTests(unittest.TestCase):
             log.write_text("helper log\n")
             helper = profile.guest_profile.KrunHelperProcess(22, config, log)
             reader = mock.Mock()
-            reader.executable.return_value = str(profile.native_validation.HELPER)
             def cpu_snapshot(pid):
                 return {"pid": pid, "observed_ns": time.monotonic_ns(), "threads": [{
                     "handle": 1, "name": "worker", "user_ns": 0, "system_ns": 0, "run_state": 3,
                 }]}
             reader.snapshot.side_effect = OSError("denied") if cpu_failure else cpu_snapshot
             with contextlib.ExitStack() as stack:
-                stack.enter_context(mock.patch.object(profile, "ThreadReader", return_value=reader))
-                stack.enter_context(mock.patch.object(profile.guest_profile, "krun_helper_processes",
-                                                      return_value={22: helper}))
                 reset = stack.enter_context(mock.patch.object(profile.guest_profile, "reset_tx_datapath",
                     side_effect=RuntimeError("reset failure") if reset_failure else None))
                 snapshot = stack.enter_context(mock.patch.object(profile.guest_profile, "snapshot_tx_datapath",
@@ -149,7 +147,8 @@ class AttributionContextTests(unittest.TestCase):
                     side_effect=RuntimeError("snapshot failure") if snapshot_failure else None))
                 error = None
                 try:
-                    with profile.tx_attribution(output, 22, 1):
+                    with profile.tx_attribution(output, reader, helper, 1):
+                        time.sleep(hold)
                         if primary:
                             raise RuntimeError("primary sample failure")
                 except Exception as failure:
@@ -172,6 +171,16 @@ class AttributionContextTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(evidence["counters"], {"frames": 12})
         self.assertFalse(evidence["errors"])
+        self.assertEqual(evidence["window_closed_by"], "early_exit")
+
+    def test_window_closes_at_sampling_deadline_not_context_exit(self):
+        # The context outlives the 1s window, as it does during sample symbolication.
+        error, evidence = self.collect(hold=1.6)
+        self.assertIsNone(error)
+        self.assertEqual(evidence["window_closed_by"], "deadline")
+        window = evidence["snapshot_ack_ns"] - evidence["reset_ack_ns"]
+        self.assertGreaterEqual(window, 1_000_000_000)
+        self.assertLess(window, 1_500_000_000)
 
     def test_cleanup_failure_does_not_replace_sample_error(self):
         error, evidence = self.collect(primary=True, snapshot_failure=True)
@@ -193,6 +202,45 @@ class AttributionContextTests(unittest.TestCase):
         error, evidence = self.collect(cpu_failure=True)
         self.assertIn("denied", error)
         self.assertTrue(evidence["errors"])
+
+
+class PreflightTests(unittest.TestCase):
+    def preflight(self, executable=None, cpu_failure=False, snapshot_failure=False):
+        helper = profile.guest_profile.KrunHelperProcess(22, pathlib.Path("c.json"), pathlib.Path("v.log"))
+        reader = mock.Mock()
+        reader.executable.return_value = executable or str(profile.native_validation.HELPER)
+        reader.snapshot.side_effect = OSError("denied") if cpu_failure else None
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(profile, "ThreadReader", return_value=reader))
+            stack.enter_context(mock.patch.object(profile.guest_profile, "krun_helper_processes",
+                                                  return_value={22: helper}))
+            reset = stack.enter_context(mock.patch.object(profile.guest_profile, "reset_tx_datapath"))
+            snapshot = stack.enter_context(mock.patch.object(profile.guest_profile, "snapshot_tx_datapath",
+                side_effect=RuntimeError("running libkrun lacks TX handoff instrumentation fields")
+                if snapshot_failure else None))
+            try:
+                return profile.tx_preflight(22), None, reader, helper, reset, snapshot
+            except Exception as error:
+                return None, error, reader, helper, reset, snapshot
+
+    def test_preflight_checks_libproc_and_tx_fields(self):
+        result, error, reader, helper, reset, snapshot = self.preflight()
+        self.assertIsNone(error)
+        self.assertEqual(result, (reader, helper))
+        reader.snapshot.assert_called_once_with(22)
+        reset.assert_called_once_with(helper)
+        snapshot.assert_called_once_with(helper)
+
+    def test_missing_tx_fields_fail_preflight(self):
+        _, error, *_ = self.preflight(snapshot_failure=True)
+        self.assertIn("lacks TX handoff instrumentation", str(error))
+
+    def test_unprotected_helper_and_libproc_denial_fail_before_reset(self):
+        for kwargs, message in (({"executable": "/tmp/helper"}, "protected native VMM helper"),
+                                ({"cpu_failure": True}, "denied")):
+            _, error, _, _, reset, _ = self.preflight(**kwargs)
+            self.assertIn(message, str(error))
+            reset.assert_not_called()
 
 
 if __name__ == "__main__":

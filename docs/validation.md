@@ -526,8 +526,14 @@ The attribution flag adds these files to the normal archive:
   does not itself select a compatible CLI or service.
 - `tx-attribution.json`: existing libkrun TX counters, with host-monotonic bounds
   for reset request/acknowledgement and snapshot request/acknowledgement. These
-  counters cover the sampling window, not the entire 30-second transfer. Reset
-  enables the existing 1-in-64 timing instrumentation; snapshot disables it.
+  counters cover the sampling window, not the entire 30-second transfer. The
+  window opens at reset acknowledgement (slightly before `sample` attaches) and
+  closes `--sample-seconds` later, before sample symbolication and the top wait;
+  the final CPU sweep is taken at the same deadline. `window_closed_by` records
+  `deadline`, or `early_exit` when sampling failed first. Reset enables the
+  existing 1-in-64 timing instrumentation; snapshot disables it. A reset and
+  snapshot preflight runs before warmup, so a libkrun without the TX handoff
+  fields, or a denied libproc read, fails before any sampling.
 - `host-activity.json`: one external libproc thread sweep per second for the VMM
   and the Python harness/host sink, raw cumulative user/system nanoseconds and
   instantaneous states, plus consecutive-observation CPU deltas. Coverage is

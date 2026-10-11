@@ -13,6 +13,10 @@ import threading
 import time
 from pathlib import Path
 
+# sys/proc_info.h proc_pidinfo flavors.
+PROC_PIDTHREADINFO = 5
+PROC_PIDLISTTHREADS = 6
+
 
 class ProcThreadInfo(ctypes.Structure):
     _fields_ = [
@@ -47,7 +51,7 @@ class ThreadReader:
         handles = (ctypes.c_uint64 * 4096)()
         size = ctypes.sizeof(handles)
         ctypes.set_errno(0)
-        length = self.libproc.proc_pidinfo(pid, 6, 0, handles, size)
+        length = self.libproc.proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, handles, size)
         if length <= 0:
             raise OSError(ctypes.get_errno(), f"PROC_PIDLISTTHREADS({pid}) failed")
         if length >= size or length % ctypes.sizeof(ctypes.c_uint64):
@@ -57,7 +61,7 @@ class ThreadReader:
             info = ProcThreadInfo()
             ctypes.set_errno(0)
             length = self.libproc.proc_pidinfo(
-                pid, 5, handle, ctypes.byref(info), ctypes.sizeof(info),
+                pid, PROC_PIDTHREADINFO, handle, ctypes.byref(info), ctypes.sizeof(info),
             )
             if length != ctypes.sizeof(info):
                 # A sink thread may finish between enumeration and this read.
@@ -136,7 +140,11 @@ class HostActivity:
 
     def start(self) -> None:
         # Synchronous preflight: a permission/ABI failure cannot become an empty PASS.
-        self.observe()
+        try:
+            self.observe()
+        except Exception as error:
+            self.errors.append(repr(error))
+            raise
         self.thread.start()
 
     def _run(self) -> None:
@@ -153,13 +161,15 @@ class HostActivity:
         if self.thread.ident is not None:
             self.thread.join(timeout=5)
         if self.thread.is_alive():
-            raise RuntimeError("host activity collector did not terminate")
+            # Keep partial evidence; the collector may still append, so copy below.
+            self.errors.append("host activity collector did not terminate")
         if not self.errors:
             try:
                 self.observe()
             except Exception as error:
                 self.errors.append(repr(error))
-        intervals = cpu_intervals(self.observations)
+        observations = list(self.observations)
+        intervals = cpu_intervals(observations)
         missing = sorted(set(self.pids) - {row["role"] for row in intervals})
         if missing:
             self.errors.append(f"no consecutive thread CPU coverage for: {missing}")
@@ -171,7 +181,7 @@ class HostActivity:
             "run_states": {1: "running/runnable", 2: "stopped", 3: "waiting",
                            4: "uninterruptible", 5: "halted"},
             "sink_role": "harness_and_sink includes Python orchestration and observation overhead",
-            "observations": self.observations, "cpu_intervals": intervals,
+            "observations": observations, "cpu_intervals": intervals,
             "errors": self.errors,
         }, indent=2) + "\n", encoding="utf-8")
         if self.errors:

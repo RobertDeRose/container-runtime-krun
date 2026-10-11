@@ -20,6 +20,7 @@ from pathlib import Path
 import benchmark_network_streams as streams_bench
 import native_vmnet_validation as native_validation
 import profile_network_guest_cpu as guest_profile
+from install_root import derive_install_root
 from network_host_activity import HostActivity, ThreadReader
 
 
@@ -229,11 +230,9 @@ def capture_installed_provenance(output: Path, stage: str) -> dict[str, object]:
     if not binary:
         raise RuntimeError("container CLI is unavailable")
     cli = Path(binary).resolve()
-    install_root = os.environ.get("INSTALL_ROOT")
+    install_root = os.environ.get("INSTALL_ROOT") or derive_install_root()
     if not install_root:
-        if cli.parent.name != "bin":
-            raise RuntimeError("cannot derive installed runtime path; set INSTALL_ROOT")
-        install_root = str(cli.parent.parent)
+        raise RuntimeError("cannot derive installed runtime path; set INSTALL_ROOT")
     plugin = Path(install_root) / "libexec/container-plugins/container-runtime-krun"
     version = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=10, check=True)
     evidence: dict[str, object] = {
@@ -245,6 +244,7 @@ def capture_installed_provenance(output: Path, stage: str) -> dict[str, object]:
         for path, key in (
             (native_validation.LIBRARY, "sha256"),
             (native_validation.HELPER, "helper_sha256"),
+            (plugin / "lib/libkrun.dylib", "sha256"),
             (plugin / "bin/container-runtime-krun", "runtime_sha256"),
         ):
             if not path.is_file():
@@ -259,48 +259,79 @@ def capture_installed_provenance(output: Path, stage: str) -> dict[str, object]:
         (output / f"installed-{stage}.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
-@contextmanager
-def tx_attribution(output: Path, helper_pid: int, seconds: int):
-    """Correlate existing opt-in TX counters with external thread CPU readings."""
+def tx_preflight(helper_pid: int) -> tuple[ThreadReader, guest_profile.KrunHelperProcess]:
+    """Fail before warmup when the helper, libproc access, or TX fields are unusable."""
     reader = ThreadReader()
     if reader.executable(helper_pid) != str(native_validation.HELPER):
         raise RuntimeError("TX attribution requires the protected native VMM helper")
     helper = guest_profile.krun_helper_processes().get(helper_pid)
     if helper is None:
         raise RuntimeError(f"cannot find profiling log for VMM PID {helper_pid}")
+    reader.snapshot(helper_pid)
+    # Snapshot validates the handoff fields and disables timing again.
+    guest_profile.reset_tx_datapath(helper)
+    guest_profile.snapshot_tx_datapath(helper)
+    return reader, helper
+
+
+@contextmanager
+def tx_attribution(output: Path, reader: ThreadReader, helper: guest_profile.KrunHelperProcess,
+                   seconds: int):
+    """Correlate existing opt-in TX counters with external thread CPU readings."""
     shutil.copyfile(helper.config_path, output / "krun-vmm.json")
     activity = HostActivity(output / "host-activity.json",
-                            {"vmm": helper_pid, "harness_and_sink": os.getpid()}, seconds, reader)
+                            {"vmm": helper.pid, "harness_and_sink": os.getpid()}, seconds, reader)
     evidence: dict[str, object] = {"clock": "host monotonic nanoseconds"}
     reset = False
     primary_error = None
     errors = []
+    window_lock = threading.Lock()
+    window_closed = False
+    timer = None
+
+    def close_window(reason: str) -> None:
+        # Counters and CPU sweeps end together at the sampling deadline, not after
+        # sample symbolication or the top wait.
+        nonlocal window_closed
+        with window_lock:
+            if window_closed:
+                return
+            window_closed = True
+            evidence["window_closed_by"] = reason
+            if reset:
+                try:
+                    evidence["snapshot_requested_ns"] = time.monotonic_ns()
+                    evidence["counters"] = guest_profile.snapshot_tx_datapath(helper)
+                    evidence["snapshot_ack_ns"] = time.monotonic_ns()
+                except Exception as error:
+                    errors.append(f"TX snapshot: {error!r}")
+            try:
+                activity.finish()
+            except Exception as error:
+                errors.append(f"host activity: {error!r}")
+
     try:
         activity.start()
         evidence["reset_requested_ns"] = time.monotonic_ns()
         guest_profile.reset_tx_datapath(helper)
         reset = True
         evidence["reset_ack_ns"] = time.monotonic_ns()
+        timer = threading.Timer(seconds, close_window, args=("deadline",))
+        timer.daemon = True
+        timer.start()
         yield
     except BaseException as error:
         primary_error = error
         raise
     finally:
-        if reset:
-            try:
-                evidence["snapshot_requested_ns"] = time.monotonic_ns()
-                evidence["counters"] = guest_profile.snapshot_tx_datapath(helper)
-                evidence["snapshot_ack_ns"] = time.monotonic_ns()
-            except Exception as error:
-                errors.append(f"TX snapshot: {error!r}")
-        for label, action in (
-            ("host activity", activity.finish),
-            ("VMM log", lambda: shutil.copyfile(helper.log_path, output / "krun-vmm.log")),
-        ):
-            try:
-                action()
-            except Exception as error:
-                errors.append(f"{label}: {error!r}")
+        if timer is not None:
+            timer.cancel()
+        # Waits for a deadline close already in progress.
+        close_window("early_exit")
+        try:
+            shutil.copyfile(helper.log_path, output / "krun-vmm.log")
+        except Exception as error:
+            errors.append(f"VMM log: {error!r}")
         evidence["errors"] = errors
         evidence["primary_error"] = repr(primary_error) if primary_error else None
         try:
@@ -404,6 +435,10 @@ def main() -> int:
         metadata["helper_pid"] = helper_pid
         metadata["container_id"] = endpoint.container_id
         (output / "helper-pid.txt").write_text(f"{helper_pid}\n", encoding="utf-8")
+        tx_target = None
+        if args.tx_attribution:
+            tx_target = tx_preflight(helper_pid)
+            bench.log("TX attribution preflight passed")
 
         bench.log(f"warmup {args.runtime} guest_to_host P{args.streams}")
         with streams_bench.SinkServer(endpoint.gateway) as sink:
@@ -445,7 +480,7 @@ def main() -> int:
         time.sleep(args.sample_delay)
 
         (output / "ps-profile-start.txt").write_text(process_listing(), encoding="utf-8")
-        attribution = tx_attribution(output, helper_pid, args.sample_seconds) if args.tx_attribution else nullcontext()
+        attribution = tx_attribution(output, *tx_target, args.sample_seconds) if tx_target else nullcontext()
         with attribution:
             top_proc = start_top(helper_pid, args.sample_seconds, output, whole_host=args.tx_attribution)
             sample_failed = True
@@ -487,28 +522,34 @@ def main() -> int:
         bench.log(f"profile failed: {error}")
         (output / "fatal-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
     finally:
-        # A profiler/collector failure must not archive while the source and its
-        # sink are still writing evidence. Keep the existing bounded source wait.
-        if source_thread is not None and source_thread.ident is not None:
-            source_thread.join(timeout=max(0, source_deadline - time.monotonic()))
-            if source_thread.is_alive():
+        try:
+            # A profiler/collector failure must not archive while the source and its
+            # sink are still writing evidence. Keep the existing bounded source wait.
+            if source_thread is not None and source_thread.ident is not None:
+                source_thread.join(timeout=max(0, source_deadline - time.monotonic()))
+                if source_thread.is_alive():
+                    failed = True
+                    error_holder.append("profile source did not terminate before cleanup")
+            if error_holder:
                 failed = True
-                error_holder.append("profile source did not terminate before cleanup")
-        if error_holder:
+                (output / "source-errors.json").write_text(json.dumps(error_holder, indent=2) + "\n", encoding="utf-8")
+            if installed is not None:
+                try:
+                    if capture_installed_provenance(output, "after") != installed:
+                        raise RuntimeError("installed files/provenance changed during profiling")
+                except Exception as error:
+                    failed = True
+                    (output / "installation-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
+        except BaseException:
+            # An interrupt during the bounded wait must not skip VM cleanup.
             failed = True
-            (output / "source-errors.json").write_text(json.dumps(error_holder, indent=2) + "\n", encoding="utf-8")
-        if installed is not None:
-            try:
-                if capture_installed_provenance(output, "after") != installed:
-                    raise RuntimeError("installed files/provenance changed during profiling")
-            except Exception as error:
-                failed = True
-                (output / "installation-error.txt").write_text(repr(error) + "\n", encoding="utf-8")
-        metadata["result"] = "FAIL" if failed else "PASS"
-        (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-        bench.cleanup()
-        with tarfile.open(archive, "w:gz") as tar:
-            tar.add(output, arcname=output.name)
+            raise
+        finally:
+            metadata["result"] = "FAIL" if failed else "PASS"
+            (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+            bench.cleanup()
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(output, arcname=output.name)
 
     print(f"result={'FAIL' if failed else 'PASS'}")
     print(f"output={output}")

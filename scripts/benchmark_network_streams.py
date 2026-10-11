@@ -445,9 +445,22 @@ class SinkServer:
 
     def close(self) -> None:
         self.stop_event.set()
-        self.socket.close()
+        # _serve exits within one accept timeout. Drain the listen backlog before
+        # closing so a source that connected and failed still leaves a record.
         self.thread.join(timeout=2)
-        for worker in self.workers:
+        if not self.thread.is_alive():
+            self.socket.setblocking(False)
+            while True:
+                try:
+                    conn, _ = self.socket.accept()
+                except OSError:
+                    break
+                conn.setblocking(True)
+                worker = threading.Thread(target=self._handle, args=(conn,), daemon=True)
+                self.workers.append(worker)
+                worker.start()
+        self.socket.close()
+        for worker in list(self.workers):
             worker.join(timeout=2)
         if self.errors:
             raise RuntimeError("host sink failure: " + "; ".join(self.errors))

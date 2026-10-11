@@ -215,6 +215,10 @@ class ProfilerWorkflowTests(unittest.TestCase):
                                                                    autospec=True, return_value=installation))
                 attribution_capture = stack.enter_context(mock.patch.object(profile, "tx_attribution",
                                                                             autospec=True))
+                tx_target = (mock.sentinel.reader, mock.sentinel.helper)
+                preflight = stack.enter_context(mock.patch.object(profile, "tx_preflight", autospec=True,
+                    return_value=tx_target,
+                    side_effect=RuntimeError("injected preflight failure") if failure == "tx_preflight" else None))
                 # Isolated collector tests exercise the real attribution context.
                 attribution_capture.return_value = contextlib.nullcontext()
                 if failure in ("sample", "sample_and_top"):
@@ -255,7 +259,7 @@ class ProfilerWorkflowTests(unittest.TestCase):
             self.assertEqual(start[start.index("--network") + 1], "fixture-network")
             self.assertIn("fixture:image", start)
             self.assertEqual(commands[-1], ["container", "delete", "--force", started[0]])
-            if failure in ("start", "warmup"):
+            if failure in ("start", "warmup", "tx_preflight"):
                 start_top.assert_not_called()
                 run_sample.assert_not_called()
             else:
@@ -267,10 +271,15 @@ class ProfilerWorkflowTests(unittest.TestCase):
             if attribution:
                 self.assertEqual(provenance.call_args_list, [mock.call(output, "before"), mock.call(output, "after")])
                 self.assertEqual(metadata["installed_libkrun_commit"], "installed-commit")
-                if failure not in ("start", "warmup"):
-                    attribution_capture.assert_called_once_with(output, 22, 1)
+                if failure != "start":
+                    preflight.assert_called_once_with(22)
+                if failure not in ("start", "warmup", "tx_preflight"):
+                    attribution_capture.assert_called_once_with(output, *tx_target, 1)
+                if failure == "tx_preflight":
+                    self.assertEqual(source_calls, [], "warmup must not run after a failed preflight")
             else:
                 provenance.assert_not_called()
+                preflight.assert_not_called()
                 attribution_capture.assert_not_called()
             return status, error
 
@@ -297,6 +306,11 @@ class ProfilerWorkflowTests(unittest.TestCase):
     def test_main_enables_attribution_without_changing_loopback_sender(self):
         status, error = self.run_profile(attribution=True)
         self.assertEqual(status, 0, error)
+
+    def test_main_fails_tx_preflight_before_warmup(self):
+        status, error = self.run_profile(failure="tx_preflight", attribution=True)
+        self.assertEqual(status, 1)
+        self.assertIn("injected preflight failure", error)
 
     def test_main_archives_sample_failure_and_finishes_top(self):
         status, error = self.run_profile(failure="sample", attribution=True)
