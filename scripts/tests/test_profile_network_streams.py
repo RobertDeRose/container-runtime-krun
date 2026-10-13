@@ -167,6 +167,7 @@ class ProfilerWorkflowTests(unittest.TestCase):
                     return run_subprocess([sys.executable, *argv[4:]], **kwargs)
             elif argv[1] == "delete":
                 self.assertEqual(argv[2:], ["--force", started[-1]])
+                status = 1 if failure == "cleanup" else 0
             else:
                 self.fail(f"unexpected container command: {argv}")
             return subprocess.CompletedProcess(argv, status, stdout, stderr)
@@ -250,7 +251,8 @@ class ProfilerWorkflowTests(unittest.TestCase):
                         self.assertGreater(result["bytes"], 0)
                         self.assertEqual(result["streams"], 2)
                 else:
-                    self.assertIn(f"{output.name}/fatal-error.txt", archive.getnames())
+                    recorded = "cleanup-errors.txt" if failure == "cleanup" else "fatal-error.txt"
+                    self.assertIn(f"{output.name}/{recorded}", archive.getnames())
 
             self.assertEqual(len(started), 1, error)
             self.assertTrue(started[0].endswith("-r1"))
@@ -302,6 +304,11 @@ class ProfilerWorkflowTests(unittest.TestCase):
         status, error = self.run_profile(failure="source")
         self.assertEqual(status, 1)
         self.assertIn("profile-guest-to-host-source failed with exit 1", error)
+
+    def test_main_fails_when_container_cleanup_fails(self):
+        status, error = self.run_profile(failure="cleanup")
+        self.assertEqual(status, 1)
+        self.assertIsNone(error)
 
     def test_main_enables_attribution_without_changing_loopback_sender(self):
         status, error = self.run_profile(attribution=True)

@@ -230,10 +230,9 @@ def capture_installed_provenance(output: Path, stage: str) -> dict[str, object]:
     if not binary:
         raise RuntimeError("container CLI is unavailable")
     cli = Path(binary).resolve()
-    install_root = os.environ.get("INSTALL_ROOT") or derive_install_root()
+    install_root = os.environ.get("INSTALL_ROOT") or derive_install_root(binary)
     if not install_root:
         raise RuntimeError("cannot derive installed runtime path; set INSTALL_ROOT")
-    plugin = Path(install_root) / "libexec/container-plugins/container-runtime-krun"
     version = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=10, check=True)
     evidence: dict[str, object] = {
         "commit": values["commit"], "provenance": values, "files": [], "verified": False,
@@ -241,12 +240,7 @@ def capture_installed_provenance(output: Path, stage: str) -> dict[str, object]:
                           "version": version.stdout.strip()},
     }
     try:
-        for path, key in (
-            (native_validation.LIBRARY, "sha256"),
-            (native_validation.HELPER, "helper_sha256"),
-            (plugin / "lib/libkrun.dylib", "sha256"),
-            (plugin / "bin/container-runtime-krun", "runtime_sha256"),
-        ):
+        for path, key in native_validation.installed_images(Path(install_root)):
             if not path.is_file():
                 raise RuntimeError(f"installed native image not found: {path}; select the matching container CLI/install root")
             actual = native_validation.digest(path)
@@ -545,11 +539,15 @@ def main() -> int:
             failed = True
             raise
         finally:
-            metadata["result"] = "FAIL" if failed else "PASS"
-            (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-            bench.cleanup()
-            with tarfile.open(archive, "w:gz") as tar:
-                tar.add(output, arcname=output.name)
+            try:
+                bench.cleanup()
+            finally:
+                # A VM that could not be deleted is a failed run, as in the other profilers.
+                failed = failed or bench.failed
+                metadata["result"] = "FAIL" if failed else "PASS"
+                (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+                with tarfile.open(archive, "w:gz") as tar:
+                    tar.add(output, arcname=output.name)
 
     print(f"result={'FAIL' if failed else 'PASS'}")
     print(f"output={output}")

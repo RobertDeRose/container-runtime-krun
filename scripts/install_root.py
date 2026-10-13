@@ -6,8 +6,8 @@ import shutil
 from pathlib import Path
 
 
-def derive_install_root() -> Path | None:
-    binary = shutil.which("container")
+def derive_install_root(binary: str | None = None) -> Path | None:
+    binary = binary or shutil.which("container")
     if not binary:
         return None
     resolved = Path(os.path.realpath(binary))

@@ -57,7 +57,7 @@ unprivileged. Native failures never fall back to external `vmnet-helper`.
 ## Prerequisites
 
 - Apple Silicon Mac running macOS 26+ and a macOS 26+ SDK.
-- Apple Container 1.5.0 (`d265d66`) and Containerization 0.47.0.
+- Apple Container 1.5.0 and Containerization 0.47.0.
 - mise 2026.9.3+, Xcode Swift 6.2+, Homebrew `llvm`, `lld`, and `xz`.
 - The coordinated libkrun patch, applied with `git am --3way` to the managed pinned checkout.
 - Administrator approval for a root-owned helper/library and a narrowly scoped

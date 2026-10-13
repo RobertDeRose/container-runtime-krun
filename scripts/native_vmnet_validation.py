@@ -272,13 +272,18 @@ def host_server(address: str, token: str) -> Iterator[int]:
         thread.join(timeout=2)
 
 
-def validate_install(run: Run, install_root: Path) -> None:
+def installed_images(install_root: Path) -> tuple[tuple[Path, str], ...]:
+    """Installed native images paired with the provenance key that records each hash."""
     plugin = install_root / 'libexec/container-plugins/container-runtime-krun'
+    return ((LIBRARY, 'sha256'), (HELPER, 'helper_sha256'),
+            (plugin / 'lib/libkrun.dylib', 'sha256'),
+            (plugin / 'bin/container-runtime-krun', 'runtime_sha256'))
+
+
+def validate_install(run: Run, install_root: Path) -> None:
     values = provenance((TRUSTED / 'lib/libkrun.provenance').read_text())
     (run.directory / 'libkrun.provenance').write_text((TRUSTED / 'lib/libkrun.provenance').read_text())
-    for image, key in ((LIBRARY, 'sha256'), (HELPER, 'helper_sha256'),
-                       (plugin / 'lib/libkrun.dylib', 'sha256'),
-                       (plugin / 'bin/container-runtime-krun', 'runtime_sha256')):
+    for image, key in installed_images(install_root):
         require(digest(image) == values[key], f'installed hash does not match provenance: {image}')
     for label, image in (('helper', HELPER), ('libkrun', LIBRARY)):
         check_privileged_path(image)
