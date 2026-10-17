@@ -31,7 +31,7 @@ clang -O2 -std=c11 -fblocks -Wall -Wextra -Wno-unused-parameter -isysroot "$sdk"
 
 # Direct vmnet_write modes are not run by default: unpaced writes exhaust kernel
 # mbuf clusters within about 1300 frames and block vmnet_write for 20-30 s,
-# which is host-wide state. Run them by hand: vmnet-tx-bench -t -d -q direct N.
+# which is host-wide state. Run them by hand, paced: vmnet-tx-bench -d -q -T <writers> -r 40000 direct 1.
 /usr/bin/sudo -v
 for iteration in 1 2 3; do
   for mode in socket bridge; do

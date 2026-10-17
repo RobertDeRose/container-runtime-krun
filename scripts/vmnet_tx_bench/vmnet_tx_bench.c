@@ -20,6 +20,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -341,6 +342,7 @@ struct direct_loop {
     bool failed;
     bool vary_seq;
     uint32_t seq;
+    uint64_t interval_ns;
 };
 
 // Reads and discards frames the bridge forwards toward the guest side.
@@ -372,7 +374,15 @@ static void *direct_loop_thread(void *opaque)
 {
     struct direct_loop *loop = opaque;
     uint64_t deadline = now_ns() + (uint64_t)(loop->seconds * 1e9);
+    uint64_t next_send = now_ns();
     while (now_ns() < deadline) {
+        if (loop->interval_ns) {
+            // Pace each writer like a virtio TX queue fed at a fixed rate.
+            while (now_ns() < next_send) {
+                sched_yield();
+            }
+            next_send += loop->interval_ns * loop->batch;
+        }
         for (size_t i = 0; i < loop->batch; i++) {
             loop->packets[i].vm_pkt_size = loop->length;
             loop->iovs[i].iov_len = loop->length;
@@ -407,7 +417,8 @@ static void *direct_loop_thread(void *opaque)
 }
 
 static int run_direct(size_t length, double seconds, size_t batch, const char *gateway,
-                      const char *netmask, int offload, const uint8_t gateway_ip[4], bool use_thread, bool drain_rx, bool vary_seq)
+                      const char *netmask, int offload, const uint8_t gateway_ip[4], bool use_thread, bool drain_rx, bool vary_seq,
+                      const char *source_memory, size_t threads, uint64_t rate)
 {
     int fd = -1;
     void *opaque = NULL;
@@ -422,7 +433,16 @@ static int run_direct(size_t length, double seconds, size_t batch, const char *g
     if (batch > bridge->write_batch_size) {
         batch = bridge->write_batch_size;
     }
-    uint8_t *frames = malloc(batch * length);
+    // Frame source memory: malloc, or an mmap region like a VMM's guest RAM.
+    uint8_t *frames;
+    if (strcmp(source_memory, "malloc") == 0) {
+        frames = malloc(batch * length);
+    } else {
+        int flags = MAP_ANON | (strcmp(source_memory, "shared") == 0 ? MAP_SHARED : MAP_PRIVATE);
+        frames = mmap(NULL, batch * length, PROT_READ | PROT_WRITE, flags, -1, 0);
+        if (frames == MAP_FAILED) { perror("mmap"); return 1; }
+    }
+    printf("source_memory=%s writers=%zu\n", source_memory, threads);
     struct iovec *iovs = calloc(batch, sizeof(*iovs));
     struct vmpktdesc *packets = calloc(batch, sizeof(*packets));
     for (size_t i = 0; i < batch; i++) {
@@ -437,6 +457,7 @@ static int run_direct(size_t length, double seconds, size_t batch, const char *g
         .bridge = bridge, .packets = packets, .iovs = iovs, .batch = batch, .length = length,
         .seconds = seconds, .latencies = calloc(MAX_LATENCIES, sizeof(uint32_t)),
         .vary_seq = vary_seq, .seq = 1,
+        .interval_ns = rate ? 1000000000ull / rate : 0,
     };
     pthread_t drain_thread;
     struct rx_drain drain = {.fd = fd};
@@ -444,15 +465,48 @@ static int run_direct(size_t length, double seconds, size_t batch, const char *g
     if (drain_rx) {
         pthread_create(&drain_thread, NULL, drain_rx_thread, &drain);
     }
+    // Extra writers get their own frames, iovecs, and sequence space, and
+    // share only the vmnet interface, like independent virtio TX queues would.
+    struct direct_loop *loops = calloc(threads, sizeof(*loops));
+    pthread_t *writers = calloc(threads, sizeof(*writers));
+    loops[0] = loop;
+    for (size_t t = 1; t < threads; t++) {
+        loops[t] = loop;
+        loops[t].latencies = calloc(MAX_LATENCIES, sizeof(uint32_t));
+        loops[t].seq = (uint32_t)(t * 0x10000000u);
+        uint8_t *copy = malloc(batch * length);
+        struct iovec *copy_iovs = calloc(batch, sizeof(*copy_iovs));
+        struct vmpktdesc *copy_packets = calloc(batch, sizeof(*copy_packets));
+        for (size_t i = 0; i < batch; i++) {
+            build_frame(copy + i * length, length, gateway_ip, (uint32_t)(i + 1));
+            copy[i * length + 35] = (uint8_t)(0x40 + t); // distinct source port per writer
+            copy_iovs[i].iov_base = copy + i * length;
+            copy_iovs[i].iov_len = length;
+            copy_packets[i].vm_pkt_size = length;
+            copy_packets[i].vm_pkt_iov = &copy_iovs[i];
+            copy_packets[i].vm_pkt_iovcnt = 1;
+        }
+        loops[t].iovs = copy_iovs;
+        loops[t].packets = copy_packets;
+    }
     uint64_t cpu0 = cpu_ns(), t0 = now_ns();
-    if (use_thread) {
-        pthread_t thread;
-        pthread_create(&thread, NULL, direct_loop_thread, &loop);
-        pthread_join(thread, NULL);
+    if (use_thread || threads > 1) {
+        for (size_t t = 0; t < threads; t++) {
+            pthread_create(&writers[t], NULL, direct_loop_thread, &loops[t]);
+        }
+        for (size_t t = 0; t < threads; t++) {
+            pthread_join(writers[t], NULL);
+        }
     } else {
-        direct_loop_thread(&loop);
+        direct_loop_thread(&loops[0]);
     }
     uint64_t wall = now_ns() - t0, cpu = cpu_ns() - cpu0;
+    loop = loops[0];
+    for (size_t t = 1; t < threads; t++) {
+        loop.written += loops[t].written;
+        loop.stalls += loops[t].stalls;
+        loop.failed |= loops[t].failed;
+    }
     if (drain_rx) {
         atomic_store(&drain.stop, true);
         pthread_join(drain_thread, NULL);
@@ -460,13 +514,13 @@ static int run_direct(size_t length, double seconds, size_t batch, const char *g
     if (loop.failed) {
         return 1;
     }
-    char mode[48];
-    snprintf(mode, sizeof(mode), "direct%zu%s%s%s", batch, use_thread ? "-thread" : "",
-             drain_rx ? "-drain" : "", vary_seq ? "-seq" : "");
+    char mode[64];
+    snprintf(mode, sizeof(mode), "direct%zu%s%s%s-w%zu-r%llu", batch, use_thread ? "-thread" : "",
+             drain_rx ? "-drain" : "", vary_seq ? "-seq" : "", threads, (unsigned long long)rate);
     report(mode, loop.written, length, wall, cpu, loop.stalls);
     if (loop.calls > 0) {
         qsort(loop.latencies, loop.calls, sizeof(uint32_t), compare_u32);
-        printf("  vmnet_write latency us: min=%u p50=%u p90=%u max=%u calls=%zu\n",
+        printf("  writer0 vmnet_write latency us: min=%u p50=%u p90=%u max=%u calls=%zu\n",
                loop.latencies[0], loop.latencies[loop.calls / 2],
                loop.latencies[loop.calls * 9 / 10], loop.latencies[loop.calls - 1], loop.calls);
     }
@@ -485,8 +539,11 @@ int main(int argc, char **argv)
     bool use_thread = false;
     bool drain_rx = false;
     bool vary_seq = false;
+    const char *source_memory = "malloc";
+    size_t threads = 1;
+    uint64_t rate = 0;
     int option;
-    while ((option = getopt(argc, argv, "g:m:l:s:o:tdq")) != -1) {
+    while ((option = getopt(argc, argv, "g:m:l:s:o:tdqM:T:r:")) != -1) {
         switch (option) {
         case 'g': gateway = optarg; break;
         case 'm': netmask = optarg; break;
@@ -496,8 +553,11 @@ int main(int argc, char **argv)
         case 't': use_thread = true; break;
         case 'd': drain_rx = true; break;
         case 'q': vary_seq = true; break;
+        case 'M': source_memory = optarg; break;
+        case 'r': rate = strtoull(optarg, NULL, 10); break;
+        case 'T': threads = (size_t)strtoul(optarg, NULL, 10); if (threads == 0) threads = 1; break;
         default:
-            fprintf(stderr, "usage: %s [-g gateway] [-m netmask] [-l frame_bytes] [-s seconds] [-o 0|1] [-t] [-d] [-q] socket|bridge|direct N\n", argv[0]);
+            fprintf(stderr, "usage: %s [-g gateway] [-m netmask] [-l frame_bytes] [-s seconds] [-o 0|1] [-t] [-d] [-q] [-M malloc|private|shared] [-T writers] [-r frames_per_s_per_writer] socket|bridge|direct N\n", argv[0]);
             return 2;
         }
     }
@@ -528,7 +588,7 @@ int main(int argc, char **argv)
         if (batch == 0) {
             batch = 1;
         }
-        return run_direct(length, seconds, batch, gateway, netmask, offload, gateway_ip, use_thread, drain_rx, vary_seq);
+        return run_direct(length, seconds, batch, gateway, netmask, offload, gateway_ip, use_thread, drain_rx, vary_seq, source_memory, threads, rate);
     }
     fprintf(stderr, "unknown mode %s\n", mode);
     return 2;
