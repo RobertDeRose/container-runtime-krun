@@ -18,10 +18,15 @@ same Apple-owned allocationOnly subnet without taking an exclusive
 `vmnet_network_ref` reservation,
 so concurrent VMM processes can coexist on that subnet. The guest remains
 statically configured from Apple's attachment and does not run a DHCP client; the
-shared-mode vmnet DHCP service is not used by the runtime. libkrun's internal
-anonymous socket pair carries raw Ethernet to the existing virtio-net implementation;
-there is no external packet helper, named packet socket, or silent fallback. Native
-setup failure is a startup failure.
+shared-mode vmnet DHCP service is not used by the runtime. Guest-to-host frames
+are written to vmnet from the virtio-net worker threads straight out of guest
+memory; libkrun offers one RX/TX queue pair per vCPU (at most 8, or
+`KRUN_NET_QUEUE_PAIRS` in the VMM environment) with a control queue that accepts
+only the multiqueue pair-count command, and each TX queue has its own worker.
+Host-to-guest frames arrive on pair 0 through libkrun's internal anonymous socket
+pair. `KRUN_VMNET_SOCKET_TX` in the VMM environment forces the earlier socket-pair
+TX path with a single pair for comparison. There is no external packet helper,
+named packet socket, or silent fallback. Native setup failure is a startup failure.
 
 ## Privilege boundary
 
