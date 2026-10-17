@@ -561,6 +561,41 @@ still leaves the cause ambiguous, use a bounded system scheduling trace or a
 separate justified instrumentation patch before changing the datapath. Do not
 resurrect reverted direct-TX, ring, IRQ, or QoS experiments from stack percentages.
 
+### Host-only TX service rate of the native vmnet bridge
+
+When the guest profile shows a fixed throughput ceiling with no loss, no
+window or buffer limitation, and an unsaturated worker, measure the host side
+of the guest-to-host path on its own before changing the datapath:
+
+```bash
+scripts/vmnet_tx_bench/run.sh
+```
+
+The script compiles the production `vmnet.c` from the managed libkrun checkout
+into a small harness, requests sudo for vmnet shared mode, and feeds guest-sized
+TSO frames (64,800 bytes by default; `FRAME_BYTES` and `SECONDS_PER_MODE`
+override) to the gateway with no VM involved. It alternates two modes three
+times and records `results.txt` under `validation-results/vmnet-tx-bench-*`:
+
+- `socket`: feeder -> Unix datagram socketpair -> the bridge's production
+  receive and copy code, with `vmnet_write` left out. This is the transport cost.
+- `bridge`: feeder -> socketpair -> bridge thread -> `vmnet_write`. This is the
+  runtime's TX path, so its rate is the ceiling the virtio-net worker can reach
+  through the bridge regardless of guest behaviour.
+
+Each line reports frames and MiB per second, CPU microseconds per frame across
+all threads, and `stalls` (feeder retries on a full socket buffer, expected).
+Compare `bridge` with the paired guest-to-host baseline: a guest result at or
+below the `bridge` rate means the worker is the tighter stage; a `bridge` rate
+well below Apple's runtime means the bridge thread itself bounds the path.
+
+A `direct N` mode writes to vmnet from the caller with `N` frames per call and
+is deliberately not part of `run.sh`: unpaced `vmnet_write` bursts exhaust
+kernel mbuf clusters within a few thousand frames, after which `vmnet_write`
+blocks for tens of seconds and subsequent runs stall for minutes. That is
+host-wide state, and the same hazard applies to any design that writes to vmnet
+without backpressure. Run it by hand only on a host with no other VM traffic.
+
 ### Socket-only congestion-control comparison
 
 When a TCP profile shows no meaningful loss or window/buffer limitation, compare
