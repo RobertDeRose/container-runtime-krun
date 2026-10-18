@@ -34,6 +34,15 @@ VMs; comparing transports there means rebuilding libkrun with the other default.
 There is no external packet helper, named packet socket, or silent fallback. Native
 setup failure is a startup failure.
 
+The runtime leaves TCP congestion control to the guest kernel's default (`bbr`;
+the Apple guest kernel registers only `reno` and `bbr`) and passes a configured
+`net.ipv4.tcp_congestion_control` through unchanged. Reno was evaluated as a
+runtime default and rejected: it raises bulk guest-to-host throughput only while
+the host has spare capacity, and in every measurement it multiplied round-trip
+time on the local link from well under a millisecond to several milliseconds,
+which is the wrong trade for a container runtime's default. The paired benchmark's
+`--tcp-congestion` option selects per socket for comparisons.
+
 ## Privilege boundary
 
 The plugin itself continues running as the Apple Container user. For a networked
@@ -153,7 +162,10 @@ concurrent VMs on the same Apple network, a two-NIC container plus partial netwo
 allocation rollback, published TCP and UDP ports plus partial forwarder rollback,
 and recovery after an abrupt VMM `SIGKILL`. It also rejects production-source
 references to the old `vmnet-helper`, `krun_add_net_unixgram`, and named packet
-socket path.
+socket path outside the benchmark control mode: `KrunVMNetBackend.swift` and the
+two files that select it may reference the legacy backend only while they carry
+the `vmnetHelperControl` gate, and the installed plugin must not carry the
+one-shot `.vmnet-helper-control` marker that enables that mode.
 
 By default the acceptance collector then runs the non-superseded regression
 collectors for lifecycle/memory, init, copy, volumes, Unix sockets, virtiofs, logs,

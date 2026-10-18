@@ -46,6 +46,28 @@ import Testing
   #expect(wrapped.map(\.port) == [0])
 }
 
+@Test func guestSysctlsLeaveCongestionControlToTheGuestUnlessConfigured() throws {
+  let image = ImageDescription(
+    reference: "example.invalid/test:latest",
+    descriptor: Descriptor(
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: "sha256:" + String(repeating: "0", count: 64),
+      size: 0
+    )
+  )
+  let process = ProcessConfiguration(executable: "/bin/sh", arguments: ["-c", "true"], environment: [])
+  var container = ContainerConfiguration(id: "sysctl-test", image: image, process: process)
+
+  // No congestion control is injected; the guest kernel default applies.
+  let defaults = KrunSpecBuilder.guestSysctls(container)
+  #expect(defaults["net.ipv4.tcp_congestion_control"] == nil)
+  #expect(defaults["vm.overcommit_memory"] == "1")
+
+  // A configured congestion control is passed through unchanged.
+  container.sysctls["net.ipv4.tcp_congestion_control"] = "reno"
+  #expect(KrunSpecBuilder.guestSysctls(container)["net.ipv4.tcp_congestion_control"] == "reno")
+}
+
 @Test func specBuilderWrapsOnlyTheInitProcess() throws {
   let image = ImageDescription(
     reference: "example.invalid/test:latest",

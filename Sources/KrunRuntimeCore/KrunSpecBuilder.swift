@@ -145,6 +145,11 @@ public enum KrunSpecBuilder {
 
   public static func guestSysctls(_ config: ContainerConfiguration) -> [String: String] {
     var result = config.sysctls
+    // TCP congestion control is left to the guest kernel's default (bbr; the
+    // kernel registers only reno and bbr). Reno raises bulk throughput on the
+    // native vmnet path only while the host has spare capacity and multiplies
+    // round-trip time on the local link either way, so it is not forced here;
+    // a configured net.ipv4.tcp_congestion_control is passed through unchanged.
     result["vm.overcommit_memory"] = "1"
     result["vm.max_map_count"] = "262144"
     return result
