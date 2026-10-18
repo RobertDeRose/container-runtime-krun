@@ -158,6 +158,12 @@ def tcp_snapshot(sock, phase):
     started = time.perf_counter_ns()
     raw = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
     finished = time.perf_counter_ns()
+    # TCP_CC_INFO (26): the congestion control's own state, e.g. BBR's
+    # bandwidth and min RTT estimates. Not every algorithm provides it.
+    try:
+        cc_info = sock.getsockopt(socket.IPPROTO_TCP, 26, 64).hex()
+    except OSError:
+        cc_info = None
     return {
         "phase": phase,
         "elapsed_seconds": (
@@ -166,6 +172,7 @@ def tcp_snapshot(sock, phase):
         ),
         "getsockopt_ns": finished - started,
         "tcp_info_hex": raw.hex(),
+        "tcp_cc_info_hex": cc_info,
     }
 
 def tcp_register(stream_id, sock):
@@ -871,6 +878,23 @@ def decode_tcp_info(raw_hex: str, byteorder: str) -> dict[str, int | None]:
     }
 
 
+# Linux UAPI struct tcp_bbr_info (TCP_CC_INFO for bbr): five u32 fields.
+# bw is bytes per second split into lo/hi words; gains are scaled by 256.
+def decode_tcp_cc_info(raw_hex: str | None, byteorder: str, algorithm: str) -> dict[str, float | int] | None:
+    if raw_hex is None or algorithm != "bbr":
+        return None
+    raw = bytes.fromhex(raw_hex)
+    if len(raw) < 20:
+        return None
+    words = [int.from_bytes(raw[i:i + 4], byteorder) for i in range(0, 20, 4)]
+    return {
+        "bw_bytes_per_second": words[0] | (words[1] << 32),
+        "min_rtt_us": words[2],
+        "pacing_gain": words[3] / 256,
+        "cwnd_gain": words[4] / 256,
+    }
+
+
 def save_tcp_flow_evidence(
     bench: Benchmark, endpoint: Endpoint, label: str, payload: dict[str, object],
     streams: int, seconds: float,
@@ -894,6 +918,13 @@ def save_tcp_flow_evidence(
             except (KeyError, TypeError, ValueError) as error:
                 row["decode_error"] = str(error)
                 problems.append(f"TCP_INFO decode failed for stream {flow['stream_id']}: {error}")
+            try:
+                bbr = decode_tcp_cc_info(row.get("tcp_cc_info_hex"), evidence["byteorder"],
+                                         str(flow.get("congestion_control")))
+            except (TypeError, ValueError):
+                bbr = None
+            if bbr is not None:
+                row["bbr"] = bbr
         # Very short warmups may finish before the first sampling interval.
         if seconds >= 2 * bench.tcp_info_interval_ms / 1000:
             if not any(row["phase"] == "sending" and "tcp_info" in row for row in snapshots):

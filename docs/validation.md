@@ -477,6 +477,12 @@ names retain their Linux `tcpi_` names. Key interpretation rules:
   microseconds. Compare their deltas; the latter two indicate receive-window and
   send-buffer limitation. Rate fields are bytes per second.
 
+- For BBR flows each sample also carries `bbr`: the algorithm's own bandwidth
+  estimate (bytes per second), its minimum-RTT estimate (microseconds), and the
+  pacing and congestion-window gains in effect, decoded from `TCP_CC_INFO`. These
+  are the inputs BBR sizes its window from; compare them across runtimes before
+  changing a datapath for BBR's sake.
+
 Use `sending` samples for sustained-flow state, and the connected/payload-end/
 complete boundaries for cumulative deltas. Do not treat final post-acknowledgement
 window or unacknowledged values as representative of sustained transmission.

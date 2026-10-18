@@ -21,6 +21,24 @@ sys.modules[SPEC.name] = bench
 SPEC.loader.exec_module(bench)
 
 
+class CongestionControlInfoTests(unittest.TestCase):
+    def test_bbr_info_decodes_bandwidth_min_rtt_and_gains(self):
+        words = (0x0001_0000, 0x0000_0002, 650, 2 * 256 + 128, 2 * 256)
+        raw = b"".join(w.to_bytes(4, "little") for w in words) + bytes(12)
+        decoded = bench.decode_tcp_cc_info(raw.hex(), "little", "bbr")
+        self.assertEqual(decoded, {
+            "bw_bytes_per_second": (2 << 32) | 0x0001_0000,
+            "min_rtt_us": 650,
+            "pacing_gain": 2.5,
+            "cwnd_gain": 2.0,
+        })
+
+    def test_cc_info_is_absent_for_other_algorithms_or_short_data(self):
+        self.assertIsNone(bench.decode_tcp_cc_info(None, "little", "bbr"))
+        self.assertIsNone(bench.decode_tcp_cc_info(bytes(20).hex(), "little", "reno"))
+        self.assertIsNone(bench.decode_tcp_cc_info(bytes(8).hex(), "little", "bbr"))
+
+
 class TcpInfoDecoderTests(unittest.TestCase):
     def test_both_guest_byte_orders_and_wide_counters(self):
         for byteorder in ("little", "big"):
