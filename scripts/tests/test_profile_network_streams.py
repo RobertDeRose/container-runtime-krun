@@ -153,6 +153,9 @@ class ProfilerWorkflowTests(unittest.TestCase):
                 stdout = json.dumps([{"status": {"networks": [{
                     "ipv4Address": "127.0.0.2/8", "ipv4Gateway": "127.0.0.1",
                 }]}}])
+            elif argv[1] == "exec" and argv[3] == "cat":
+                self.assertEqual(argv[2], started[-1])
+                stdout = "           CPU0       CPU1\n 42:  1 2 virtio-net\ncpu  1 2 3 4\n"
             elif argv[1] == "exec":
                 self.assertEqual(argv[2], started[-1])
                 self.assertEqual(argv[3:5], ["python3", "-c"])

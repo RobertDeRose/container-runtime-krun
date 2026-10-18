@@ -538,6 +538,11 @@ The attribution flag adds these files to the normal archive:
   instantaneous states, plus consecutive-observation CPU deltas. Coverage is
   bounded. New/departed/renamed/counter-reset threads have no interval estimate,
   not zero CPU. Python CPU includes orchestration and collector overhead.
+- `guest-cpu-before.txt` and `guest-cpu-after.txt`: the guest's `/proc/interrupts`
+  and `/proc/stat` around the sampling window. The MMIO transport has one interrupt
+  line per device, so these show whether one vCPU carries all virtio-net
+  completion work. `--tcp-congestion` selects the profiled sender's congestion
+  control per socket, like the paired benchmark.
 - `host-top.txt`: whole-host load, memory, and the busiest 20 processes, rather
   than a VMM-only filter. `top-status.txt` records completion; failed or timed-out
   top/CPU/counter capture cannot become an attribution PASS.

@@ -104,6 +104,10 @@ def thread_snapshot_argv(pid: int) -> list[str]:
     ]
 
 
+def guest_cpu_argv(container_id: str) -> list[str]:
+    return ["container", "exec", container_id, "cat", "/proc/interrupts", "/proc/stat"]
+
+
 def capture_command(output: Path, name: str, argv: list[str], timeout: int = 30) -> int:
     try:
         result = subprocess.run(
@@ -349,6 +353,8 @@ def main() -> int:
     parser.add_argument("--sample-delay", type=float, default=2.0)
     parser.add_argument("--sample-seconds", type=int, default=20)
     parser.add_argument("--sample-interval-ms", type=int, default=10)
+    parser.add_argument("--tcp-congestion", choices=("default", "bbr", "cubic", "reno"), default="default",
+                        help="per-socket congestion control for the profiled sender (default: guest default)")
     parser.add_argument("--tx-attribution", action="store_true",
                         help="Native krun only: verify installed files, capture TX counters and host thread CPU")
     parser.add_argument("--chunk-kib", type=int, default=256)
@@ -383,6 +389,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
 
     bench = streams_bench.Benchmark(output, args.timeout)
+    bench.tcp_congestion = args.tcp_congestion
     prefix = f"krun-profile-{token.lower()}"
     endpoint: streams_bench.Endpoint | None = None
     failed = False
@@ -413,6 +420,7 @@ def main() -> int:
         "machine": platform.machine(),
         "sample_path": shutil.which("sample") or "/usr/bin/sample",
         "tx_attribution": args.tx_attribution,
+        "tcp_congestion": args.tcp_congestion,
         "host_sink_pid": os.getpid(),
     }
 
@@ -474,6 +482,9 @@ def main() -> int:
         time.sleep(args.sample_delay)
 
         (output / "ps-profile-start.txt").write_text(process_listing(), encoding="utf-8")
+        # Guest interrupt and per-CPU time before and after the window show whether
+        # one vCPU carries all virtio-net completion work.
+        capture_command(output, "guest-cpu-before.txt", guest_cpu_argv(endpoint.container_id))
         attribution = tx_attribution(output, *tx_target, args.sample_seconds) if tx_target else nullcontext()
         with attribution:
             top_proc = start_top(helper_pid, args.sample_seconds, output, whole_host=args.tx_attribution)
@@ -494,6 +505,7 @@ def main() -> int:
                     print(f"[network-profile] additional top failure: {error!r}", file=sys.stderr)
 
         (output / "ps-profile-end.txt").write_text(process_listing(), encoding="utf-8")
+        capture_command(output, "guest-cpu-after.txt", guest_cpu_argv(endpoint.container_id))
         source_thread.join(timeout=max(0, source_deadline - time.monotonic()))
         if source_thread.is_alive():
             raise RuntimeError("profile source did not terminate")
