@@ -23,10 +23,14 @@ are written to vmnet from the virtio-net worker threads straight out of guest
 memory; libkrun offers one RX/TX queue pair per vCPU (at most 8, or
 `KRUN_NET_QUEUE_PAIRS` in the VMM environment) with a control queue that accepts
 only the multiqueue pair-count command, and each TX queue has its own worker.
-Host-to-guest frames arrive on pair 0 through libkrun's internal anonymous socket
-pair. `KRUN_VMNET_SOCKET_TX` in the VMM environment forces the earlier socket-pair
-TX path with a single pair for comparison. There is no external packet helper,
-named packet socket, or silent fallback. Native setup failure is a startup failure.
+Host-to-guest frames are written into pair 0's receive ring by the bridge's vmnet
+receive callback; frames that arrive while the ring is empty wait in a bounded list
+that the worker drains when the guest posts buffers, and drops beyond that bound are
+logged. libkrun's internal anonymous socket pair remains only as the fallback
+transport. `KRUN_VMNET_SOCKET_TX` and `KRUN_VMNET_SOCKET_RX` in the VMM environment
+force the earlier socket-pair path for either direction (TX also drops to a single
+pair) for comparison. There is no external packet helper, named packet socket, or
+silent fallback. Native setup failure is a startup failure.
 
 ## Privilege boundary
 
