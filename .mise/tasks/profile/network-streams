@@ -11,6 +11,7 @@
 #USAGE flag "--sample-interval-ms <milliseconds>" help="macOS sample interval in milliseconds" default="10"
 #USAGE flag "--tx-attribution" help="Native krun: installed provenance, TX counters, whole-host top, and thread CPU"
 #USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
+#USAGE flag "--tcp-congestion <algorithm>" help="Sender congestion control per socket: default, bbr, cubic, or reno" default="default"
 #USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
 #USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
 
@@ -32,6 +33,7 @@ exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/profile_network_
   --sample-seconds "${usage_sample_seconds?}" \
   --sample-interval-ms "${usage_sample_interval_ms?}" \
   --chunk-kib "${usage_chunk_kib?}" \
+  --tcp-congestion "${usage_tcp_congestion?}" \
   --timeout "${usage_timeout?}" \
   --result-root "${usage_result_root?}" \
   ${extra[@]+"${extra[@]}"}
