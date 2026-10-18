@@ -262,6 +262,20 @@ def reserve_tcp_port() -> Iterator[int]:
         sock.close()
 
 
+# The benchmark control mode runs the pre-native Unixgram datapath on the same
+# VM for paired comparisons. It is selected only by a one-shot marker file that
+# the runtime deletes on start, so its implementation is not the production
+# path. These files may reference the legacy backend only while they carry the
+# gate that confines it (the runtime's control-mode enum, or the helper's
+# per-network backend case); nothing else in production sources may.
+CONTROL_MODE_FILES = {
+    'Sources/KrunRuntimeCore/KrunVMNetBackend.swift': 'vmnetHelperControl',
+    'Sources/KrunRuntimePlugin/main.swift': 'vmnetHelperControl',
+    'Sources/KrunVMMHelper/KrunVMMHelperMain.swift': 'case .unixgram:',
+}
+CONTROL_MARKER = '.vmnet-helper-control'
+
+
 def legacy_source_violations(root: Path = PROJECT_ROOT) -> list[str]:
     roots = [root / 'Sources', root / 'plugin']
     files = [root / 'mise.toml', root / 'scripts/install_native_vmnet.sh', root / 'scripts/build_native_libkrun.sh']
@@ -275,10 +289,23 @@ def legacy_source_violations(root: Path = PROJECT_ROOT) -> list[str]:
             text = path.read_text(errors='replace')
         except OSError:
             continue
+        relative = str(path.relative_to(root))
+        gate = CONTROL_MODE_FILES.get(relative)
+        if gate is not None and gate in text:
+            continue
         for token in forbidden:
             if token in text:
-                violations.append(f'{path.relative_to(root)}: {token}')
+                violations.append(f'{relative}: {token}')
     return violations
+
+
+def control_marker_path(install_root: Path) -> Path:
+    return install_root / 'libexec/container-plugins/container-runtime-krun/bin' / CONTROL_MARKER
+
+
+def installed_control_mode_violations(install_root: Path) -> list[str]:
+    marker = control_marker_path(install_root)
+    return [f'installed plugin carries the benchmark control marker: {marker}'] if marker.exists() else []
 
 
 def copy_bundle_named(run: native.Run, bundle: Path, prefix: str) -> None:
@@ -717,10 +744,10 @@ def main() -> int:
         system = json.loads(run.command('system-status', ['container', 'system', 'status', '--format', 'json']))
         install_root = Path(system['paths']['installRoot'])
         native.validate_install(run, install_root)
-        violations = legacy_source_violations()
+        violations = legacy_source_violations() + installed_control_mode_violations(install_root)
         (directory / 'legacy-source-violations.txt').write_text('\n'.join(violations) + ('\n' if violations else ''))
-        require(not violations, f'legacy packet backend remains in production sources: {violations}')
-        run.record('legacy external-helper implementation removed from production path', True)
+        require(not violations, f'legacy packet backend remains in production path: {violations}')
+        run.record('legacy external-helper implementation confined to the gated benchmark control mode', True)
 
         acceptance = Acceptance(args, run, system, prefix)
         for name, phase in (

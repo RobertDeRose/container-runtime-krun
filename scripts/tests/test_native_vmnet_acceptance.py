@@ -96,6 +96,39 @@ class LegacyRemovalTests(unittest.TestCase):
             self.assertEqual(len(violations), 2)
             self.assertTrue(all(value.startswith('Sources/backend.swift:') for value in violations))
 
+    def test_legacy_scan_allows_only_gated_control_mode_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Sources/KrunRuntimeCore').mkdir(parents=True)
+            (root / 'Sources/KrunRuntimePlugin').mkdir(parents=True)
+            (root / 'plugin').mkdir()
+            (root / 'scripts').mkdir()
+            (root / 'mise.toml').write_text('native')
+            (root / 'scripts/install_native_vmnet.sh').write_text('native')
+            (root / 'scripts/build_native_libkrun.sh').write_text('native')
+            # Gated control-mode implementation: allowed.
+            (root / 'Sources/KrunRuntimeCore/KrunVMNetBackend.swift').write_text(
+                'case vmnetHelperControl\n"/opt/vmnet-helper/bin/vmnet-helper"\n')
+            # Same allow-listed path without its gate: not allowed.
+            (root / 'Sources/KrunRuntimePlugin/main.swift').write_text('launch vmnet-helper unconditionally\n')
+            # The helper's gate is its per-network backend case.
+            (root / 'Sources/KrunVMMHelper').mkdir()
+            (root / 'Sources/KrunVMMHelper/KrunVMMHelperMain.swift').write_text(
+                'case .unixgram:\n  krun_add_net_unixgram(net)\n')
+            violations = acceptance.legacy_source_violations(root)
+            self.assertEqual(violations, ['Sources/KrunRuntimePlugin/main.swift: vmnet-helper'])
+
+    def test_installed_control_marker_is_a_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install_root = Path(directory)
+            self.assertEqual(acceptance.installed_control_mode_violations(install_root), [])
+            marker = acceptance.control_marker_path(install_root)
+            marker.parent.mkdir(parents=True)
+            marker.write_text('vmnet-helper-control-v1\n')
+            violations = acceptance.installed_control_mode_violations(install_root)
+            self.assertEqual(len(violations), 1)
+            self.assertIn(str(marker), violations[0])
+
 
 class RouteValidationTests(unittest.TestCase):
     def test_connected_route_accepts_direct_kernel_route(self) -> None:
