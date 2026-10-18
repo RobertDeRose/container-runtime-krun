@@ -167,6 +167,13 @@ Important archive files are `SUMMARY.json`, `results.txt`, `run.json`,
 `libkrun.provenance`, `krun-vmm.json`, `krun-vmm.log`, `container-inspect.txt`,
 `processes-live.txt`, `backend-observations.json`, and the per-traffic-check outputs.
 
+Endpoint-security software can fail the acceptance collector from the host side.
+A transparent proxy network extension (Sophos is one) may reject the collector's
+own Python `connect()` to guests on private ranges such as `10.0.0.0/8` with
+`No route to host` while `curl` and `nc` reach the same guest and ICMP and ARP are
+normal. When the two-NIC HTTP probe is the only failing check, confirm with
+`curl http://<guest>:8080/` from the host before treating it as a runtime fault.
+
 After this gate passes twice consecutively, run the native acceptance collector:
 
 ```bash
