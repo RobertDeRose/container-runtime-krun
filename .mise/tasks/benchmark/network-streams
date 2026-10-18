@@ -21,7 +21,7 @@ set -euo pipefail
 
 extra=()
 IFS=',' read -r -a guest_caps <<< "${usage_guest_cap_add:-}"
-for capability in "${guest_caps[@]}"; do
+for capability in ${guest_caps[@]+"${guest_caps[@]}"}; do
   [[ -n "$capability" ]] && extra+=(--guest-cap-add "$capability")
 done
 if [[ -n "${usage_guest_setup:-}" ]]; then

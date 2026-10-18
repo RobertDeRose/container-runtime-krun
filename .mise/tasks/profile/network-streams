@@ -12,6 +12,8 @@
 #USAGE flag "--tx-attribution" help="Native krun: installed provenance, TX counters, whole-host top, and thread CPU"
 #USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
 #USAGE flag "--tcp-congestion <algorithm>" help="Sender congestion control per socket: default, bbr, cubic, or reno" default="default"
+#USAGE flag "--guest-cap-add <caps>" help="Comma-separated Linux capabilities granted to the endpoint" default=""
+#USAGE flag "--guest-setup <command>" help="Shell command run in the endpoint once ready" default=""
 #USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
 #USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
 
@@ -20,6 +22,13 @@ set -euo pipefail
 extra=()
 if [[ "${usage_tx_attribution:-false}" == true ]]; then
   extra+=(--tx-attribution)
+fi
+IFS=',' read -r -a guest_caps <<< "${usage_guest_cap_add:-}"
+for capability in ${guest_caps[@]+"${guest_caps[@]}"}; do
+  [[ -n "$capability" ]] && extra+=(--guest-cap-add "$capability")
+done
+if [[ -n "${usage_guest_setup:-}" ]]; then
+  extra+=(--guest-setup "${usage_guest_setup}")
 fi
 
 exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/profile_network_streams.py" \

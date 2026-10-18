@@ -355,6 +355,10 @@ def main() -> int:
     parser.add_argument("--sample-interval-ms", type=int, default=10)
     parser.add_argument("--tcp-congestion", choices=("default", "bbr", "cubic", "reno"), default="default",
                         help="per-socket congestion control for the profiled sender (default: guest default)")
+    parser.add_argument("--guest-cap-add", action="append", default=[],
+                        help="Linux capability granted to the endpoint (repeatable)")
+    parser.add_argument("--guest-setup", default=None,
+                        help="shell command run in the endpoint after it is ready")
     parser.add_argument("--tx-attribution", action="store_true",
                         help="Native krun only: verify installed files, capture TX counters and host thread CPU")
     parser.add_argument("--chunk-kib", type=int, default=256)
@@ -390,6 +394,8 @@ def main() -> int:
 
     bench = streams_bench.Benchmark(output, args.timeout)
     bench.tcp_congestion = args.tcp_congestion
+    bench.guest_cap_add = list(args.guest_cap_add)
+    bench.guest_setup = args.guest_setup
     prefix = f"krun-profile-{token.lower()}"
     endpoint: streams_bench.Endpoint | None = None
     failed = False
