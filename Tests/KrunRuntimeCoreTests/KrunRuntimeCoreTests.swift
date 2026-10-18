@@ -63,9 +63,22 @@ import Testing
   #expect(defaults["net.ipv4.tcp_congestion_control"] == nil)
   #expect(defaults["vm.overcommit_memory"] == "1")
 
-  // A configured congestion control is passed through unchanged.
-  container.sysctls["net.ipv4.tcp_congestion_control"] = "reno"
-  #expect(KrunSpecBuilder.guestSysctls(container)["net.ipv4.tcp_congestion_control"] == "reno")
+  // A label selects a guest network sysctl per container.
+  let prefix = KrunSpecBuilder.sysctlLabelPrefix
+  container.labels[prefix + "net.ipv4.tcp_congestion_control"] = "reno"
+  // Labels outside the guest network stack, or with unsafe values, are ignored.
+  container.labels[prefix + "kernel.panic"] = "1"
+  container.labels[prefix + "net.ipv4.ip_forward"] = "1 ; echo"
+  container.labels["unrelated"] = "net.ipv4.tcp_congestion_control=reno"
+  let labelled = KrunSpecBuilder.guestSysctls(container)
+  #expect(labelled["net.ipv4.tcp_congestion_control"] == "reno")
+  #expect(labelled["kernel.panic"] == nil)
+  #expect(labelled["net.ipv4.ip_forward"] == nil)
+  #expect(labelled.count == 3)
+
+  // An explicitly configured sysctl wins over a label.
+  container.sysctls["net.ipv4.tcp_congestion_control"] = "bbr"
+  #expect(KrunSpecBuilder.guestSysctls(container)["net.ipv4.tcp_congestion_control"] == "bbr")
 }
 
 @Test func specBuilderWrapsOnlyTheInitProcess() throws {

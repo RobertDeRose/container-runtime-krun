@@ -143,13 +143,30 @@ public enum KrunSpecBuilder {
     "/run/container/\(containerID)/rootfs"
   }
 
+  /// Label prefix that selects guest network sysctls per container, since the
+  /// CLI exposes labels but not sysctls: `--label <prefix>net.ipv4.tcp_congestion_control=reno`.
+  public static let sysctlLabelPrefix = "com.github.robertderose.container-runtime-krun.sysctl."
+
   public static func guestSysctls(_ config: ContainerConfiguration) -> [String: String] {
-    var result = config.sysctls
-    // TCP congestion control is left to the guest kernel's default (bbr; the
-    // kernel registers only reno and bbr). Reno raises bulk throughput on the
-    // native vmnet path only while the host has spare capacity and multiplies
-    // round-trip time on the local link either way, so it is not forced here;
-    // a configured net.ipv4.tcp_congestion_control is passed through unchanged.
+    // Labels first, explicit configuration sysctls over them, runtime
+    // requirements last. Only the guest network stack is reachable by label.
+    var result: [String: String] = [:]
+    for (label, value) in config.labels where label.hasPrefix(sysctlLabelPrefix) {
+      let key = String(label.dropFirst(sysctlLabelPrefix.count))
+      guard key.hasPrefix("net."),
+        key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" }),
+        !value.isEmpty, value.allSatisfy({ !$0.isWhitespace && $0 != "/" })
+      else {
+        continue
+      }
+      result[key] = value
+    }
+    // TCP congestion control is otherwise left to the guest kernel's default
+    // (bbr; the kernel registers only reno and bbr). Reno raises bulk throughput
+    // on the native vmnet path only while the host has spare capacity and
+    // multiplies round-trip time on the local link either way, so it is a
+    // per-container choice through the label above, not a runtime default.
+    result.merge(config.sysctls) { _, configured in configured }
     result["vm.overcommit_memory"] = "1"
     result["vm.max_map_count"] = "262144"
     return result

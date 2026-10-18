@@ -40,8 +40,18 @@ the Apple guest kernel registers only `reno` and `bbr`) and passes a configured
 runtime default and rejected: it raises bulk guest-to-host throughput only while
 the host has spare capacity, and in every measurement it multiplied round-trip
 time on the local link from well under a millisecond to several milliseconds,
-which is the wrong trade for a container runtime's default. The paired benchmark's
-`--tcp-congestion` option selects per socket for comparisons.
+which is the wrong trade for a container runtime's default. A container that wants
+it opts in per container, since the CLI exposes labels but not sysctls:
+
+```bash
+container run --runtime container-runtime-krun \
+  --label com.github.robertderose.container-runtime-krun.sysctl.net.ipv4.tcp_congestion_control=reno \
+  ...
+```
+
+Labels under that prefix set guest `net.*` sysctls only; other keys and values with
+whitespace or `/` are ignored, and an explicitly configured sysctl takes precedence.
+The paired benchmark's `--tcp-congestion` option selects per socket for comparisons.
 
 ## Privilege boundary
 
