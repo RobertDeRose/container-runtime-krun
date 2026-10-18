@@ -20,9 +20,15 @@ so concurrent VMM processes can coexist on that subnet. The guest remains
 statically configured from Apple's attachment and does not run a DHCP client; the
 shared-mode vmnet DHCP service is not used by the runtime. Guest-to-host frames
 are written to vmnet from the virtio-net worker threads straight out of guest
-memory; libkrun offers one RX/TX queue pair per vCPU (at most 8) with a control
-queue that accepts only the multiqueue pair-count command, and each TX queue has
-its own worker.
+memory, a whole drain pass per `vmnet_write` (up to 64 frames), with frames vmnet
+does not accept un-popped in order for the next pass. Per-call cost is what bounds
+this path: one call per frame leaves a single worker wall-saturated at about 11 to
+16 microseconds per 64 KiB frame, while batching brings the worker's cost per frame
+down and lets one queue carry Apple-runtime throughput. libkrun offers one RX/TX
+queue pair per vCPU (at most 8) with a control queue that accepts only the
+multiqueue pair-count command, and each TX queue has its own worker; note that
+Linux pins a TCP flow to the TX queue chosen at its first transmit, so flows
+created on one CPU stay on one queue and a single queue must be fast on its own.
 Host-to-guest frames are written into pair 0's receive ring by the bridge's vmnet
 receive callback; frames that arrive while the ring is empty wait in a bounded list
 that the worker drains when the guest posts buffers, and drops beyond that bound are
