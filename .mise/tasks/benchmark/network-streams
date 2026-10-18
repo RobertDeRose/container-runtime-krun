@@ -12,10 +12,21 @@
 #USAGE flag "--warmup-seconds <seconds>" help="Warmup duration per runtime/direction/stream count" default="1"
 #USAGE flag "--iterations <iterations>" help="A/B -> B/A samples per direction and stream count" default="4"
 #USAGE flag "--chunk-kib <kib>" help="TCP sender chunk size in KiB" default="256"
+#USAGE flag "--guest-cap-add <caps>" help="Comma-separated Linux capabilities granted to each endpoint, e.g. CAP_NET_ADMIN" default=""
+#USAGE flag "--guest-setup <command>" help="Shell command run in each endpoint once ready, e.g. an RPS sysfs write" default=""
 #USAGE flag "--timeout <seconds>" help="Command timeout" default="180"
 #USAGE flag "--result-root <dir>" help="Evidence output directory" default="validation-results"
 
 set -euo pipefail
+
+extra=()
+IFS=',' read -r -a guest_caps <<< "${usage_guest_cap_add:-}"
+for capability in "${guest_caps[@]}"; do
+  [[ -n "$capability" ]] && extra+=(--guest-cap-add "$capability")
+done
+if [[ -n "${usage_guest_setup:-}" ]]; then
+  extra+=(--guest-setup "${usage_guest_setup}")
+fi
 
 exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/benchmark_network_streams.py" \
   --runtime-a "${usage_runtime_a?}" \
@@ -31,4 +42,5 @@ exec /usr/bin/caffeinate -i python3 "$MISE_PROJECT_ROOT/scripts/benchmark_networ
   --iterations "${usage_iterations?}" \
   --chunk-kib "${usage_chunk_kib?}" \
   --timeout "${usage_timeout?}" \
-  --result-root "${usage_result_root?}"
+  --result-root "${usage_result_root?}" \
+  ${extra[@]+"${extra[@]}"}

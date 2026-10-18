@@ -69,6 +69,46 @@ class EndpointNamingTests(unittest.TestCase):
         self.assertEqual(seen, [endpoint.container_id])
         self.assertLessEqual(len(endpoint.container_id), 63)
 
+    def test_guest_capabilities_and_setup_are_applied_to_each_endpoint(self):
+        original_run = network_streams.Benchmark.run
+        original_wait_ready = network_streams.wait_ready
+        original_inspect_endpoint = network_streams.inspect_endpoint
+        original_free_tcp_port = network_streams.free_tcp_port
+        commands: list[tuple[str, list[str]]] = []
+
+        def fake_run(bench, label, command, **kwargs):
+            commands.append((label, list(command)))
+            return type("Result", (), {"stdout": "", "stderr": "", "returncode": 0})()
+
+        try:
+            network_streams.Benchmark.run = fake_run
+            network_streams.wait_ready = lambda _bench, _container_id: None
+            network_streams.inspect_endpoint = lambda _bench, _container_id: ("192.0.2.2", "192.0.2.1")
+            network_streams.free_tcp_port = lambda: 54321
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bench = network_streams.Benchmark(pathlib.Path(temp_dir), timeout=5)
+                bench.guest_cap_add = ["CAP_NET_ADMIN"]
+                bench.guest_setup = "echo 3e > /sys/class/net/eth0/queues/rx-0/rps_cpus"
+                endpoint = network_streams.start_endpoint(
+                    bench, "container-runtime-krun", "krun", "python:3.13-alpine", "default",
+                    "krun-streams-test", 1, 4,
+                )
+        finally:
+            network_streams.Benchmark.run = original_run
+            network_streams.wait_ready = original_wait_ready
+            network_streams.inspect_endpoint = original_inspect_endpoint
+            network_streams.free_tcp_port = original_free_tcp_port
+
+        start_label, start = commands[0]
+        self.assertEqual(start_label, "krun-start")
+        self.assertEqual(start[start.index("--cap-add") + 1], "CAP_NET_ADMIN")
+        # Capabilities precede the image; the sink program is unchanged.
+        self.assertLess(start.index("--cap-add"), start.index("python:3.13-alpine"))
+        setup_label, setup = commands[1]
+        self.assertEqual(setup_label, "krun-guest-setup")
+        self.assertEqual(setup, ["container", "exec", endpoint.container_id, "sh", "-c", bench.guest_setup])
+        self.assertEqual(len(commands), 2)
+
     def test_runtime_cpu_count_is_forwarded_to_container_run(self):
         original_run = network_streams.Benchmark.run
         original_wait_ready = network_streams.wait_ready

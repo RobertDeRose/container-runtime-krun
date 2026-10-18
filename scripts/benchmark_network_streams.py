@@ -504,6 +504,10 @@ class Benchmark:
         self.failed = False
         self.tcp_info_interval_ms = 0
         self.tcp_congestion = "default"
+        # Optional guest preparation for experiments: capabilities granted to the
+        # endpoint and a shell command run in it once it is ready.
+        self.guest_cap_add: list[str] = []
+        self.guest_setup: str | None = None
 
     def log(self, message: str) -> None:
         print(f"[network-streams] {message}", flush=True)
@@ -756,12 +760,18 @@ def start_endpoint(
     ]
     if cpus is not None:
         command.extend(["--cpus", str(cpus)])
+    for capability in bench.guest_cap_add:
+        command.extend(["--cap-add", capability])
     command.extend([
         "--publish", f"127.0.0.1:{published_port}:{GUEST_SINK_PORT}/tcp",
         image, "python3", "-u", "-c", GUEST_SINK_SERVER, str(GUEST_SINK_PORT),
     ])
     bench.run(f"{key}-start", command)
     wait_ready(bench, container_id)
+    if bench.guest_setup:
+        # Recorded per endpoint; a failed setup fails the run rather than
+        # silently measuring an unprepared guest.
+        bench.run(f"{key}-guest-setup", ["container", "exec", container_id, "sh", "-c", bench.guest_setup])
     guest_ip, gateway = inspect_endpoint(bench, container_id)
     return Endpoint(label, container_id, guest_ip, gateway, published_port)
 
@@ -1205,6 +1215,10 @@ def main() -> int:
                         help="Guest sender socket congestion control; default keeps the kernel choice")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
+    parser.add_argument("--guest-cap-add", action="append", default=[],
+                        help="Linux capability granted to each endpoint (repeatable), e.g. CAP_NET_ADMIN")
+    parser.add_argument("--guest-setup", default=None,
+                        help="shell command run in each endpoint after it is ready, e.g. an RPS sysfs write")
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--chunk-kib", type=int, default=256)
     parser.add_argument("--timeout", type=int, default=180)
@@ -1239,6 +1253,8 @@ def main() -> int:
     bench = Benchmark(output, args.timeout)
     bench.tcp_info_interval_ms = args.tcp_info_interval_ms
     bench.tcp_congestion = args.tcp_congestion
+    bench.guest_cap_add = list(args.guest_cap_add)
+    bench.guest_setup = args.guest_setup
     endpoints: list[Endpoint] = []
     prefix = f"krun-streams-{token.lower()}"
 
