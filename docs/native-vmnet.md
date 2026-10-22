@@ -184,8 +184,13 @@ Endpoint-security software can fail the acceptance collector from the host side.
 A transparent proxy network extension (Sophos is one) may reject the collector's
 own Python `connect()` to guests on private ranges such as `10.0.0.0/8` with
 `No route to host` while `curl` and `nc` reach the same guest and ICMP and ARP are
-normal. When the two-NIC HTTP probe is the only failing check, confirm with
-`curl http://<guest>:8080/` from the host before treating it as a runtime fault.
+normal. Stale networking state in the Apple Container service presents the same
+way: every third-party process gets `No route to host` toward guests on newly
+created networks while `curl` and `nc` succeed and no SYN reaches the bridge.
+When the two-NIC HTTP probe is the only failing check, confirm with
+`curl http://<guest>:8080/` from the host, then restart the service
+(`container system stop && container system start`) and rerun before treating
+it as a runtime fault.
 
 After this gate passes twice consecutively, run the native acceptance collector:
 
