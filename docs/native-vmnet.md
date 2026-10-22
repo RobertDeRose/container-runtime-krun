@@ -28,11 +28,20 @@ down and lets one queue carry Apple-runtime throughput. Holding a drain's frames
 back to form larger bursts was evaluated and rejected: it makes the host
 acknowledge in larger pieces, but a BBR sender's throughput does not rise and its
 round-trip time does, so frames are written as soon as a drain pass ends. libkrun
-offers one RX/TX
-queue pair per vCPU (at most 8) with a control queue that accepts only the
-multiqueue pair-count command, and each TX queue has its own worker; note that
-Linux pins a TCP flow to the TX queue chosen at its first transmit, so flows
-created on one CPU stay on one queue and a single queue must be fast on its own.
+offers a single RX/TX queue pair by default. It can offer one pair per vCPU (at
+most 8, `KRUN_NET_QUEUE_PAIRS`) with a control queue that accepts only the
+multiqueue pair-count command and a worker per TX queue, but that is not the
+default: Linux pins a TCP flow to the TX queue chosen at its first transmit, so
+bulk flows gain nothing from more pairs, and paced senders such as BBR lose
+because each worker then sees only a few frames per drain and pays the per-call
+cost of `vmnet_write` for them (eight paced streams measured 0.68 of Apple's
+runtime with a pair per vCPU and 0.83 with one pair; Reno was unchanged). Other
+device-side changes were measured and rejected for the same reason, since every
+added per-frame cost lowered both algorithms: copying frames out and completing
+them to the guest before the vmnet write, polling the TX ring before sleeping,
+indirect descriptors, and 256-entry rings. A larger guest MTU is not available:
+Apple's Internet Sharing clamps TCP MSS to 1240 on every vmnet shared bridge
+regardless of the interface MTU, which is why guests run at 1280.
 Host-to-guest frames are written into pair 0's receive ring by the bridge's vmnet
 receive callback; frames that arrive while the ring is empty wait in a bounded list
 that the worker drains when the guest posts buffers, and drops beyond that bound are
