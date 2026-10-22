@@ -28,6 +28,12 @@ down and lets one queue carry Apple-runtime throughput. Holding a drain's frames
 back to form larger bursts was evaluated and rejected: it makes the host
 acknowledge in larger pieces, but a BBR sender's throughput does not rise and its
 round-trip time does, so frames are written as soon as a drain pass ends. libkrun
+implements packed virtqueues (`VIRTIO_F_RING_PACKED`, the layout Apple's device
+negotiates) but offers them only when `KRUN_NET_PACKED_RING=1` is set in its own
+process environment: measured against the split layout they were neutral to
+slightly slower on this path (eight paced streams 0.77 to 0.82 of Apple's runtime
+against 0.83, Reno 1.00 against 1.05, one stream 1.06 against 1.00), so the ring
+format is not what separates the two runtimes. It
 offers a single RX/TX queue pair by default. It can offer one pair per vCPU (at
 most 8, `KRUN_NET_QUEUE_PAIRS`) with a control queue that accepts only the
 multiqueue pair-count command and a worker per TX queue, but that is not the
