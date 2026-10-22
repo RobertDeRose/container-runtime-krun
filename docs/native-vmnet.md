@@ -24,7 +24,11 @@ memory, a whole drain pass per `vmnet_write` (up to 64 frames), with frames vmne
 does not accept un-popped in order for the next pass. Per-call cost is what bounds
 this path: one call per frame leaves a single worker wall-saturated at about 11 to
 16 microseconds per 64 KiB frame, while batching brings the worker's cost per frame
-down and lets one queue carry Apple-runtime throughput. libkrun offers one RX/TX
+down and lets one queue carry Apple-runtime throughput. Holding a drain's frames
+back to form larger bursts was evaluated and rejected: it makes the host
+acknowledge in larger pieces, but a BBR sender's throughput does not rise and its
+round-trip time does, so frames are written as soon as a drain pass ends. libkrun
+offers one RX/TX
 queue pair per vCPU (at most 8) with a control queue that accepts only the
 multiqueue pair-count command, and each TX queue has its own worker; note that
 Linux pins a TCP flow to the TX queue chosen at its first transmit, so flows
